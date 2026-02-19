@@ -1,0 +1,2 @@
+Frontend URL: TO_BE_DEPLOYED
+Backend API URL: TO_BE_DEPLOYED
