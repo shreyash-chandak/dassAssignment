@@ -34,10 +34,10 @@ function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, [token]);
 
-  const login = async (email, password) => {
+  const login = async (payload) => {
     const data = await request("/auth/login", {
       method: "POST",
-      data: { email, password },
+      data: payload,
     });
 
     setToken(data.token);

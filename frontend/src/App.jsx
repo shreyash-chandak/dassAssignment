@@ -15,6 +15,7 @@ import ParticipantClubsPage from "./pages/participant/ParticipantClubsPage";
 import ParticipantClubDetailPage from "./pages/participant/ParticipantClubDetailPage";
 import ParticipantProfilePage from "./pages/participant/ParticipantProfilePage";
 import ParticipantTeamChatPage from "./pages/participant/ParticipantTeamChatPage";
+import ParticipantOnboardingPage from "./pages/participant/ParticipantOnboardingPage";
 
 import OrganizerDashboardPage from "./pages/organizer/OrganizerDashboardPage";
 import OrganizerCreateEventPage from "./pages/organizer/OrganizerCreateEventPage";
@@ -25,6 +26,7 @@ import OrganizerOngoingEventsPage from "./pages/organizer/OrganizerOngoingEvents
 import AdminDashboardPage from "./pages/admin/AdminDashboardPage";
 import AdminOrganizersPage from "./pages/admin/AdminOrganizersPage";
 import AdminResetRequestsPage from "./pages/admin/AdminResetRequestsPage";
+import AdminSecurityEventsPage from "./pages/admin/AdminSecurityEventsPage";
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -48,6 +50,14 @@ function App() {
           element={
             <ProtectedRoute roles={["participant"]}>
               <ParticipantDashboardPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/participant/onboarding"
+          element={
+            <ProtectedRoute roles={["participant"]}>
+              <ParticipantOnboardingPage />
             </ProtectedRoute>
           }
         />
@@ -162,6 +172,14 @@ function App() {
           element={
             <ProtectedRoute roles={["admin"]}>
               <AdminResetRequestsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/security"
+          element={
+            <ProtectedRoute roles={["admin"]}>
+              <AdminSecurityEventsPage />
             </ProtectedRoute>
           }
         />

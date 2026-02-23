@@ -29,6 +29,7 @@ function Navbar() {
     { to: "/admin/dashboard", label: "Dashboard" },
     { to: "/admin/organizers", label: "Manage Clubs/Organizers" },
     { to: "/admin/reset-requests", label: "Password Reset Requests" },
+    { to: "/admin/security", label: "Security Events" },
   ];
 
   const links = user

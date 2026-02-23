@@ -46,6 +46,5 @@ const registrationSchema = new mongoose.Schema(
 
 registrationSchema.index({ participant: 1, event: 1 }, { unique: true });
 registrationSchema.index({ event: 1, status: 1 });
-registrationSchema.index({ ticketId: 1 });
 
 module.exports = mongoose.model("Registration", registrationSchema);

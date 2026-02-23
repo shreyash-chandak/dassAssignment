@@ -252,7 +252,10 @@ router.get(
       name: `${r.participant?.firstName || ""} ${r.participant?.lastName || ""}`.trim(),
       email: r.participant?.email,
       regDate: r.createdAt,
+      eventType: r.eventType,
       payment: r.paymentStatus,
+      paymentProofUrl: r.paymentProofUrl || null,
+      merchandiseSelections: r.merchandiseSelections || [],
       team: r.teamName || null,
       attendance: Boolean(r.attendance?.scannedAt),
       ticketId: r.ticketId,
@@ -279,10 +282,13 @@ router.get(
     const regex = new RegExp(search, "i");
     const rows = registrations
       .map((r) => ({
+        id: r._id,
         name: `${r.participant?.firstName || ""} ${r.participant?.lastName || ""}`.trim(),
         email: r.participant?.email || "",
         regDate: r.createdAt,
+        eventType: r.eventType,
         payment: r.paymentStatus,
+        paymentProofUrl: r.paymentProofUrl || "",
         team: r.teamName || "",
         attendance: r.attendance?.scannedAt ? "present" : "absent",
         status: r.status,

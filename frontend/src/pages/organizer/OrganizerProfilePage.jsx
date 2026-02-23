@@ -74,6 +74,10 @@ function OrganizerProfilePage() {
       <Card title="Profile Settings">
         <div className="grid two">
           <label>
+            Login Email (non-editable)
+            <input value={profile.email || ""} readOnly />
+          </label>
+          <label>
             Organizer Name
             <input name="organizerName" value={profile.organizerName || ""} onChange={onChange} />
           </label>

@@ -7,6 +7,7 @@ import { request } from "../../api/client";
 function ParticipantDashboardPage() {
   const { token } = useAuth();
   const [data, setData] = useState({ upcomingEvents: [], participationHistory: {} });
+  const [calendarBatch, setCalendarBatch] = useState([]);
   const [activeTab, setActiveTab] = useState("normal");
   const [error, setError] = useState("");
 
@@ -14,6 +15,10 @@ function ParticipantDashboardPage() {
     request("/participants/dashboard", { token })
       .then(setData)
       .catch((err) => setError(err.message));
+
+    request("/calendar/batch", { token })
+      .then((payload) => setCalendarBatch(payload.events || []))
+      .catch(() => setCalendarBatch([]));
   }, [token]);
 
   const tabs = useMemo(
@@ -78,7 +83,7 @@ function ParticipantDashboardPage() {
               <article className="item" key={entry._id}>
                 <h4>{entry.event?.name || "Event"}</h4>
                 <p>
-                  Type: {entry.eventType} | Status: {entry.status}
+                  Type: {entry.eventType} | Organizer: {entry.event?.organizer?.organizerName || "N/A"} | Status: {entry.status}
                 </p>
                 <p>Team: {entry.teamName || "N/A"}</p>
                 <p>
@@ -88,6 +93,35 @@ function ParticipantDashboardPage() {
             ))
           ) : (
             <p>No records in this category.</p>
+          )}
+        </div>
+      </Card>
+
+      <Card title="Batch Calendar Export">
+        <div className="list">
+          {calendarBatch.length ? (
+            calendarBatch.map((entry) => (
+              <article className="item" key={entry.eventId}>
+                <h4>{entry.eventName}</h4>
+                <div className="row">
+                  <a className="btn btn-light" href={entry.googleCalendarLink} target="_blank" rel="noreferrer">
+                    Google
+                  </a>
+                  <a className="btn btn-light" href={entry.outlookCalendarLink} target="_blank" rel="noreferrer">
+                    Outlook
+                  </a>
+                  <a
+                    className="btn btn-light"
+                    href={`data:text/calendar;charset=utf-8,${encodeURIComponent(entry.ics || "")}`}
+                    download={`${String(entry.eventName || "event").replace(/[^a-zA-Z0-9]/g, "-")}.ics`}
+                  >
+                    Download .ics
+                  </a>
+                </div>
+              </article>
+            ))
+          ) : (
+            <p>No registered events available for batch export yet.</p>
           )}
         </div>
       </Card>

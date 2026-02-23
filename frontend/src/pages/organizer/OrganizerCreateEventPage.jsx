@@ -40,6 +40,19 @@ function OrganizerCreateEventPage() {
     ]);
   };
 
+  const moveCustomField = (index, direction) => {
+    setCustomFields((prev) => {
+      const target = direction === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= prev.length) {
+        return prev;
+      }
+
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next.map((field, i) => ({ ...field, order: i }));
+    });
+  };
+
   const addMerchItem = () => {
     setMerchItems((prev) => [...prev, { name: "", size: "", color: "", variant: "", stock: 0, price: 0 }]);
   };
@@ -219,6 +232,14 @@ function OrganizerCreateEventPage() {
                 />
                 Required
               </label>
+              <div className="row">
+                <button type="button" className="btn btn-light" onClick={() => moveCustomField(idx, "up")}>
+                  Move Up
+                </button>
+                <button type="button" className="btn btn-light" onClick={() => moveCustomField(idx, "down")}>
+                  Move Down
+                </button>
+              </div>
             </div>
           ))}
         </Card>

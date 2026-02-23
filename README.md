@@ -43,6 +43,8 @@ Implemented advanced workflows include:
   - Team chat (real-time messaging with typing indicators and presence events).
 - Tier C:
   - Add-to-calendar integration (`.ics`, Google Calendar link, Outlook link, batch export).
+  - Anonymous feedback (rating + comment, organizer analytics/filter/export).
+  - Bot protection (CAPTCHA, failed-attempt tracking, IP block, admin security logs).
 
 ## Local Setup
 
@@ -62,6 +64,20 @@ cd frontend
 cp .env.example .env
 npm install
 npm run dev
+```
+
+## Verification
+
+Run these before submission:
+
+```bash
+cd backend
+npm run smoke
+```
+
+```bash
+cd frontend
+npm run build
 ```
 
 ## Notes

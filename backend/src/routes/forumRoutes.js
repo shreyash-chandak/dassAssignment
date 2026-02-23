@@ -83,7 +83,9 @@ router.post(
 
     const populated = await message.populate("user", "firstName lastName organizerName role");
     const io = req.app.get("io");
-    io.to(`forum:${req.params.eventId}`).emit("forum:new-message", populated);
+    if (io) {
+      io.to(`forum:${req.params.eventId}`).emit("forum:new-message", populated);
+    }
 
     return res.status(201).json({ message: populated });
   })
@@ -111,7 +113,9 @@ router.patch(
     await message.save();
 
     const io = req.app.get("io");
-    io.to(`forum:${req.params.eventId}`).emit("forum:message-updated", message);
+    if (io) {
+      io.to(`forum:${req.params.eventId}`).emit("forum:message-updated", message);
+    }
 
     return res.json({ message });
   })
@@ -139,7 +143,9 @@ router.delete(
 
     await message.deleteOne();
     const io = req.app.get("io");
-    io.to(`forum:${req.params.eventId}`).emit("forum:message-deleted", { messageId: req.params.messageId });
+    if (io) {
+      io.to(`forum:${req.params.eventId}`).emit("forum:message-deleted", { messageId: req.params.messageId });
+    }
 
     return res.json({ message: "Deleted" });
   })
@@ -182,7 +188,9 @@ router.post(
     await message.save();
 
     const io = req.app.get("io");
-    io.to(`forum:${req.params.eventId}`).emit("forum:message-updated", message);
+    if (io) {
+      io.to(`forum:${req.params.eventId}`).emit("forum:message-updated", message);
+    }
 
     return res.json({ message });
   })

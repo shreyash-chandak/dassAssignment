@@ -1,8 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { io } from "socket.io-client";
+import jsQR from "jsqr";
 import { useParams } from "react-router-dom";
 import Card from "../../components/Card";
 import { API_URL, request } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
+
+function extractTicketId(raw) {
+  if (!raw) {
+    return "";
+  }
+
+  const trimmed = String(raw).trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed.ticketId) {
+      return parsed.ticketId;
+    }
+  } catch (error) {
+    // ignore non-JSON
+  }
+
+  const match = trimmed.match(/FEL-[A-Z]-[A-Z0-9]{8}/i);
+  return match ? match[0].toUpperCase() : trimmed;
+}
 
 function OrganizerEventDetailPage() {
   const { id } = useParams();
@@ -14,6 +35,23 @@ function OrganizerEventDetailPage() {
   const [attendanceForm, setAttendanceForm] = useState({ ticketId: "", manualOverride: false, note: "" });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  const [forumMessages, setForumMessages] = useState([]);
+  const [forumInput, setForumInput] = useState("");
+  const [forumAnnouncement, setForumAnnouncement] = useState(false);
+  const [forumUnread, setForumUnread] = useState(0);
+  const [feedbackData, setFeedbackData] = useState({ summary: { total: 0, averageRating: 0, distribution: [] }, feedback: [] });
+  const [feedbackFilterRating, setFeedbackFilterRating] = useState("");
+
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState("");
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const scannerTimerRef = useRef(null);
+
+  const socketHost = useMemo(() => API_URL.replace(/\/api$/, ""), []);
 
   const load = () => {
     request(`/organizer/events/${id}`, { token })
@@ -29,10 +67,74 @@ function OrganizerEventDetailPage() {
       .catch((err) => setError(err.message));
   };
 
+  const loadForum = () => {
+    request(`/forum/${id}/messages`, { token })
+      .then((data) => {
+        setForumMessages(data.messages || []);
+      })
+      .catch((err) => setError(err.message));
+  };
+
+  const loadFeedback = (rating = "") => {
+    const qs = rating ? `?rating=${rating}` : "";
+    request(`/feedback/event/${id}${qs}`, { token })
+      .then((data) => setFeedbackData(data))
+      .catch((err) => setError(err.message));
+  };
+
   useEffect(() => {
     load();
+    loadForum();
+    loadFeedback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, token]);
+
+  useEffect(() => {
+    const socket = io(socketHost, { auth: { token } });
+    socket.emit("forum:join", { eventId: id });
+
+    socket.on("forum:new-message", (incoming) => {
+      setForumMessages((prev) => {
+        if (prev.some((msg) => msg._id === incoming._id)) {
+          return prev;
+        }
+        return [...prev, incoming];
+      });
+      setForumUnread((prev) => prev + 1);
+    });
+
+    socket.on("forum:message-updated", (updated) => {
+      setForumMessages((prev) => prev.map((msg) => (msg._id === updated._id ? { ...msg, ...updated } : msg)));
+    });
+
+    socket.on("forum:message-deleted", ({ messageId }) => {
+      setForumMessages((prev) => prev.filter((msg) => msg._id !== messageId));
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [id, socketHost, token]);
+
+  const stopCameraScan = () => {
+    if (scannerTimerRef.current) {
+      clearInterval(scannerTimerRef.current);
+      scannerTimerRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    setCameraActive(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCameraScan();
+    };
+  }, []);
 
   const filteredParticipants = useMemo(() => {
     if (!eventData) {
@@ -115,11 +217,138 @@ function OrganizerEventDetailPage() {
     }
   };
 
+  const postForumMessage = async () => {
+    if (!forumInput.trim()) {
+      return;
+    }
+
+    try {
+      await request(`/forum/${id}/messages`, {
+        method: "POST",
+        token,
+        data: { content: forumInput, isAnnouncement: forumAnnouncement },
+      });
+      setForumInput("");
+      setForumAnnouncement(false);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const togglePin = async (messageId) => {
+    try {
+      await request(`/forum/${id}/messages/${messageId}/pin`, {
+        method: "PATCH",
+        token,
+      });
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const deleteMessage = async (messageId) => {
+    try {
+      await request(`/forum/${id}/messages/${messageId}`, {
+        method: "DELETE",
+        token,
+      });
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const updateFeedbackFilter = (value) => {
+    setFeedbackFilterRating(value);
+    loadFeedback(value);
+  };
+
+  const startCameraScan = async () => {
+    try {
+      setCameraError("");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment",
+        },
+      });
+
+      streamRef.current = stream;
+      setCameraActive(true);
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      scannerTimerRef.current = setInterval(() => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        if (!video || !canvas || video.readyState < 2) {
+          return;
+        }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) {
+          return;
+        }
+
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const decoded = jsQR(imageData.data, canvas.width, canvas.height);
+        if (decoded?.data) {
+          const ticketId = extractTicketId(decoded.data);
+          setAttendanceForm((prev) => ({ ...prev, ticketId }));
+          setMessage(`QR decoded: ${ticketId}`);
+          stopCameraScan();
+        }
+      }, 250);
+    } catch (err) {
+      setCameraError(err.message || "Could not access camera");
+      stopCameraScan();
+    }
+  };
+
+  const decodeQrFromFile = async (file) => {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = canvasRef.current || document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) {
+        throw new Error("Unable to read image data");
+      }
+
+      ctx.drawImage(bitmap, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const decoded = jsQR(imageData.data, canvas.width, canvas.height);
+      if (!decoded?.data) {
+        throw new Error("No QR code found in image");
+      }
+
+      const ticketId = extractTicketId(decoded.data);
+      setAttendanceForm((prev) => ({ ...prev, ticketId }));
+      setMessage(`QR decoded from file: ${ticketId}`);
+    } catch (err) {
+      setCameraError(err.message || "Unable to decode QR image");
+    }
+  };
+
   if (!eventData) {
     return <div className="container">Loading event...</div>;
   }
 
-  const pendingOrders = (eventData.participants || []).filter((p) => p.status === "pending_approval");
+  const merchandiseOrders = (eventData.participants || []).filter((p) => p.eventType === "merchandise");
+  const orderSummary = {
+    pending: merchandiseOrders.filter((order) => order.status === "pending_approval").length,
+    approved: merchandiseOrders.filter((order) => order.status === "approved").length,
+    rejected: merchandiseOrders.filter((order) => order.status === "rejected").length,
+  };
 
   return (
     <div className="container">
@@ -147,6 +376,10 @@ function OrganizerEventDetailPage() {
           <article className="stat">
             <h4>Attendance</h4>
             <p>{eventData.analytics.attendance}</p>
+          </article>
+          <article className="stat">
+            <h4>Not Scanned</h4>
+            <p>{Math.max((eventData.analytics.registrations || 0) - (eventData.analytics.attendance || 0), 0)}</p>
           </article>
           <article className="stat">
             <h4>Team Completion</h4>
@@ -218,25 +451,142 @@ function OrganizerEventDetailPage() {
         </div>
       </Card>
 
-      <Card title="Merchandise Payment Approval">
+      <Card title={`Forum Moderation${forumUnread > 0 ? ` (New: ${forumUnread})` : ""}`}>
+        <div className="row">
+          <button type="button" className="btn btn-light" onClick={() => setForumUnread(0)}>
+            Mark Seen
+          </button>
+          <button type="button" className="btn btn-light" onClick={loadForum}>
+            Refresh
+          </button>
+        </div>
+
         <div className="list">
-          {pendingOrders.map((order) => (
-            <article className="item" key={order.id}>
+          {forumMessages.map((forumMessage) => (
+            <article className="item" key={forumMessage._id}>
               <p>
-                {order.name} ({order.email}) | Payment: {order.payment}
+                <strong>
+                  {forumMessage.user?.organizerName ||
+                    `${forumMessage.user?.firstName || ""} ${forumMessage.user?.lastName || ""}`.trim()}
+                </strong>
+                {forumMessage.isPinned ? " (Pinned)" : ""}
+                {forumMessage.isAnnouncement ? " (Announcement)" : ""}
               </p>
-              <p>Ticket: {order.ticketId || "Not generated"}</p>
+              <p>{forumMessage.content}</p>
+              <p className="muted">{new Date(forumMessage.createdAt).toLocaleString()}</p>
               <div className="row">
-                <button type="button" className="btn" onClick={() => decideOrder(order.id, "approved")}>
-                  Approve
+                <button type="button" className="btn btn-light" onClick={() => togglePin(forumMessage._id)}>
+                  {forumMessage.isPinned ? "Unpin" : "Pin"}
                 </button>
-                <button type="button" className="btn btn-light" onClick={() => decideOrder(order.id, "rejected")}>
-                  Reject
+                <button type="button" className="btn" onClick={() => deleteMessage(forumMessage._id)}>
+                  Delete
                 </button>
               </div>
             </article>
           ))}
-          {!pendingOrders.length && <p>No pending orders.</p>}
+          {!forumMessages.length && <p>No forum messages yet.</p>}
+        </div>
+
+        <label>
+          Post as organizer
+          <textarea value={forumInput} onChange={(e) => setForumInput(e.target.value)} rows={3} />
+        </label>
+        <label className="checkbox">
+          <input type="checkbox" checked={forumAnnouncement} onChange={(e) => setForumAnnouncement(e.target.checked)} />
+          Post as announcement
+        </label>
+        <button type="button" className="btn" onClick={postForumMessage}>
+          Post Message
+        </button>
+      </Card>
+
+      <Card title="Anonymous Feedback Analytics">
+        <div className="stats-grid">
+          <article className="stat">
+            <h4>Total Feedback</h4>
+            <p>{feedbackData.summary?.total || 0}</p>
+          </article>
+          <article className="stat">
+            <h4>Average Rating</h4>
+            <p>{Number(feedbackData.summary?.averageRating || 0).toFixed(2)}</p>
+          </article>
+        </div>
+        <p className="muted">
+          Distribution: {(feedbackData.summary?.distribution || []).map((d) => `${d.rating}*:${d.count}`).join(" | ") || "-"}
+        </p>
+        <div className="row">
+          <label>
+            Filter by Rating
+            <select value={feedbackFilterRating} onChange={(e) => updateFeedbackFilter(e.target.value)}>
+              <option value="">All</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </label>
+          <a
+            className="btn btn-light"
+            href={`${API_URL}/feedback/event/${id}?export=csv&token=${encodeURIComponent(token || "")}`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Export Feedback CSV
+          </a>
+        </div>
+        <div className="list">
+          {(feedbackData.feedback || []).map((entry, idx) => (
+            <article key={`${entry.createdAt}-${idx}`} className="item">
+              <p>Rating: {entry.rating} / 5</p>
+              <p>{entry.comment || "No comment"}</p>
+              <p className="muted">{new Date(entry.createdAt).toLocaleString()}</p>
+            </article>
+          ))}
+          {!feedbackData.feedback?.length && <p>No feedback records yet.</p>}
+        </div>
+      </Card>
+
+      <Card title="Merchandise Payment Orders">
+        <p className="muted">
+          Pending: {orderSummary.pending} | Approved: {orderSummary.approved} | Rejected: {orderSummary.rejected}
+        </p>
+        <div className="list">
+          {merchandiseOrders.map((order) => (
+            <article className="item" key={order.id}>
+              <p>
+                {order.name} ({order.email}) | Payment: {order.payment} | Status: {order.status}
+              </p>
+              <p>
+                Order Items:{" "}
+                {(order.merchandiseSelections || [])
+                  .map((item) => `${item.name} x${item.quantity}`)
+                  .join(", ") || "-"}
+              </p>
+              <p>Ticket: {order.ticketId || "Not generated"}</p>
+              <p>
+                Proof:{" "}
+                {order.paymentProofUrl ? (
+                  <a href={order.paymentProofUrl} target="_blank" rel="noreferrer">
+                    View Uploaded Proof
+                  </a>
+                ) : (
+                  "Not provided"
+                )}
+              </p>
+              {order.status === "pending_approval" && (
+                <div className="row">
+                  <button type="button" className="btn" onClick={() => decideOrder(order.id, "approved")}>
+                    Approve
+                  </button>
+                  <button type="button" className="btn btn-light" onClick={() => decideOrder(order.id, "rejected")}>
+                    Reject
+                  </button>
+                </div>
+              )}
+            </article>
+          ))}
+          {!merchandiseOrders.length && <p>No merchandise orders for this event.</p>}
         </div>
       </Card>
 
@@ -262,8 +612,44 @@ function OrganizerEventDetailPage() {
             Manual Override
           </label>
         </div>
+
+        <div className="row">
+          {!cameraActive ? (
+            <button type="button" className="btn btn-light" onClick={startCameraScan}>
+              Start Camera Scan
+            </button>
+          ) : (
+            <button type="button" className="btn btn-light" onClick={stopCameraScan}>
+              Stop Camera
+            </button>
+          )}
+
+          <label className="btn btn-light" style={{ display: "inline-block", cursor: "pointer" }}>
+            Scan from Image
+            <input
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => decodeQrFromFile(e.target.files?.[0])}
+            />
+          </label>
+        </div>
+
+        {cameraError && <p className="error">{cameraError}</p>}
+
+        {cameraActive && (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{ width: "100%", maxWidth: "420px", border: "1px solid #d9e0ea", borderRadius: "0.5rem" }}
+          />
+        )}
+        <canvas ref={canvasRef} style={{ display: "none" }} />
+
         <button className="btn" type="button" onClick={markAttendance}>
-          Scan / Mark Attendance
+          Mark Attendance
         </button>
       </Card>
 

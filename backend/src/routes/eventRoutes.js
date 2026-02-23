@@ -1,11 +1,10 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const { requireAuth, allowRoles, optionalAuth } = require("../middlewares/auth");
 const Event = require("../models/Event");
 const Registration = require("../models/Registration");
 const Team = require("../models/Team");
 const User = require("../models/User");
-const upload = require("../middlewares/upload");
+const { upload, toPublicUploadUrl } = require("../middlewares/upload");
 const asyncHandler = require("../utils/asyncHandler");
 const { createTicketPayload } = require("../services/ticketService");
 const { sendEmail } = require("../services/emailService");
@@ -13,8 +12,50 @@ const { sortEventsByPreference } = require("../services/recommendationService");
 
 const router = express.Router();
 
-function nowISO() {
-  return new Date().toISOString();
+function levenshteinDistance(a = "", b = "") {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+  for (let i = 0; i < rows; i += 1) {
+    dp[i][0] = i;
+  }
+  for (let j = 0; j < cols; j += 1) {
+    dp[0][j] = j;
+  }
+
+  for (let i = 1; i < rows; i += 1) {
+    for (let j = 1; j < cols; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+
+  return dp[a.length][b.length];
+}
+
+function fuzzyScore(query, target) {
+  const q = String(query || "").trim().toLowerCase();
+  const t = String(target || "").trim().toLowerCase();
+  if (!q || !t) {
+    return 0;
+  }
+
+  if (t.includes(q)) {
+    return 1;
+  }
+
+  const targetTokens = t.split(/\s+/).filter(Boolean);
+  let best = 0;
+  for (const token of targetTokens) {
+    const distance = levenshteinDistance(q, token);
+    const denom = Math.max(q.length, token.length) || 1;
+    const score = 1 - distance / denom;
+    if (score > best) {
+      best = score;
+    }
+  }
+  return best;
 }
 
 router.get(
@@ -53,8 +94,19 @@ router.get(
     let events = await Event.find(query).populate("organizer", "organizerName category description").sort({ startDate: 1 });
 
     if (search) {
-      const regex = new RegExp(search, "i");
-      events = events.filter((event) => regex.test(event.name) || regex.test(event.organizer?.organizerName || ""));
+      const scored = events
+        .map((event) => {
+          const eventNameScore = fuzzyScore(search, event.name);
+          const organizerScore = fuzzyScore(search, event.organizer?.organizerName || "");
+          return {
+            event,
+            score: Math.max(eventNameScore, organizerScore),
+          };
+        })
+        .filter((row) => row.score >= 0.45)
+        .sort((a, b) => b.score - a.score);
+
+      events = scored.map((row) => row.event);
     }
 
     if (req.user?.role === "participant") {
@@ -109,8 +161,18 @@ router.get(
       event.merchandiseItems.length > 0 &&
       event.merchandiseItems.every((item) => item.stock <= 0);
 
+    let viewerRegistration = null;
+    if (req.user?.role === "participant") {
+      viewerRegistration = await Registration.findOne({
+        event: event._id,
+        participant: req.user._id,
+        status: { $nin: ["cancelled", "rejected"] },
+      }).select("status attendance createdAt ticketId");
+    }
+
     return res.json({
       event,
+      viewerRegistration,
       meta: {
         activeRegistrations,
         registrationClosed,
@@ -124,6 +186,7 @@ router.post(
   "/:id/register",
   requireAuth,
   allowRoles("participant"),
+  upload.any(),
   asyncHandler(async (req, res) => {
     const event = await Event.findById(req.params.id).populate("organizer", "organizerName email");
     if (!event || event.archived) {
@@ -160,13 +223,85 @@ router.post(
       return res.status(400).json({ message: "Registration limit reached" });
     }
 
+    let parsedFormResponses = {};
+    if (typeof req.body.formResponses === "string") {
+      try {
+        parsedFormResponses = JSON.parse(req.body.formResponses);
+      } catch (error) {
+        return res.status(400).json({ message: "Invalid formResponses payload" });
+      }
+    } else if (req.body.formResponses && typeof req.body.formResponses === "object") {
+      parsedFormResponses = req.body.formResponses;
+    }
+
+    if (!parsedFormResponses || typeof parsedFormResponses !== "object" || Array.isArray(parsedFormResponses)) {
+      return res.status(400).json({ message: "formResponses must be an object" });
+    }
+
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+    const uploadedFileMap = new Map(uploadedFiles.map((file) => [file.fieldname, toPublicUploadUrl(req, file)]));
+    const normalizedFormResponses = {};
+
+    for (const field of event.customFormFields || []) {
+      let value = parsedFormResponses[field.id];
+      if ((value === undefined || value === null || value === "") && typeof req.body[field.id] !== "undefined") {
+        value = req.body[field.id];
+      }
+
+      if (field.type === "file") {
+        const uploadedValue = uploadedFileMap.get(field.id);
+        if (uploadedValue) {
+          value = uploadedValue;
+        }
+      } else if (field.type === "number" && value !== undefined && value !== null && value !== "") {
+        const numeric = Number(value);
+        if (Number.isNaN(numeric)) {
+          return res.status(400).json({ message: `Invalid number for ${field.label || field.id}` });
+        }
+        value = numeric;
+      } else if (field.type === "checkbox") {
+        if (typeof value === "string") {
+          value = ["true", "1", "on", "yes"].includes(value.toLowerCase());
+        } else if (value !== undefined) {
+          value = Boolean(value);
+        }
+      } else if (Array.isArray(value)) {
+        value = value.map((item) => String(item).trim()).filter(Boolean);
+      } else if (value !== undefined && value !== null) {
+        value = String(value).trim();
+      }
+
+      if (field.type === "dropdown" && value) {
+        const options = (field.options || []).map((option) => String(option).trim());
+        if (options.length && !options.includes(String(value))) {
+          return res.status(400).json({ message: `Invalid option selected for ${field.label || field.id}` });
+        }
+      }
+
+      const isMissing =
+        value === undefined ||
+        value === null ||
+        (typeof value === "string" && value.trim() === "") ||
+        (Array.isArray(value) && value.length === 0);
+
+      if (field.required && isMissing) {
+        return res.status(400).json({ message: `${field.label || field.id} is required` });
+      }
+
+      if (!isMissing) {
+        normalizedFormResponses[field.id] = value;
+      }
+    }
+
+    const formResponses = (event.customFormFields || []).length ? normalizedFormResponses : parsedFormResponses;
+
     const registration = await Registration.create({
       event: event._id,
       participant: req.user._id,
       organizer: event.organizer._id,
       eventType: event.eventType,
       status: "registered",
-      formResponses: req.body.formResponses || {},
+      formResponses,
       paymentStatus: "na",
       amountPaid: event.registrationFee,
     });
@@ -214,7 +349,17 @@ router.post(
       return res.status(400).json({ message: "Purchase deadline has passed" });
     }
 
-    const selections = Array.isArray(req.body.selections) ? req.body.selections : [];
+    let selections = [];
+    if (Array.isArray(req.body.selections)) {
+      selections = req.body.selections;
+    } else if (typeof req.body.selections === "string") {
+      try {
+        selections = JSON.parse(req.body.selections);
+      } catch (error) {
+        return res.status(400).json({ message: "Invalid selections payload" });
+      }
+    }
+
     if (!selections.length) {
       return res.status(400).json({ message: "At least one merchandise item is required" });
     }
@@ -256,7 +401,10 @@ router.post(
       });
     }
 
-    const paymentProofUrl = req.body.paymentProofUrl || (req.file ? `uploaded://${req.file.originalname}` : null);
+    const paymentProofUrl = req.body.paymentProofUrl || toPublicUploadUrl(req, req.file);
+    if (event.paymentApprovalRequired && !paymentProofUrl) {
+      return res.status(400).json({ message: "Payment proof is required for this merchandise event" });
+    }
     const requiresApproval = Boolean(event.paymentApprovalRequired || paymentProofUrl);
 
     const registration = await Registration.create({
@@ -309,9 +457,39 @@ router.post(
       return res.status(400).json({ message: "Team registration is not enabled for this event" });
     }
 
-    const existingTeam = await Team.findOne({ event: event._id, leader: req.user._id, status: { $ne: "cancelled" } });
+    if (!["published", "ongoing"].includes(event.status)) {
+      return res.status(400).json({ message: "Team registration is not open for this event" });
+    }
+
+    if (new Date(event.registrationDeadline) < new Date()) {
+      return res.status(400).json({ message: "Registration deadline has passed" });
+    }
+
+    const configuredMaxMembers = Number(event.teamConfig.maxMembers || 1);
+    const requestedMaxMembers = Number(maxMembers) || configuredMaxMembers;
+    if (requestedMaxMembers < 2) {
+      return res.status(400).json({ message: "Team size must be at least 2" });
+    }
+    if (requestedMaxMembers > configuredMaxMembers) {
+      return res.status(400).json({ message: `Team size cannot exceed configured max (${configuredMaxMembers})` });
+    }
+
+    const existingRegistration = await Registration.findOne({
+      event: event._id,
+      participant: req.user._id,
+      status: { $nin: ["cancelled", "rejected"] },
+    });
+    if (existingRegistration) {
+      return res.status(409).json({ message: "You are already registered for this event" });
+    }
+
+    const existingTeam = await Team.findOne({
+      event: event._id,
+      status: { $ne: "cancelled" },
+      $or: [{ leader: req.user._id }, { "members.participant": req.user._id }],
+    });
     if (existingTeam) {
-      return res.status(409).json({ message: "You already lead a team for this event" });
+      return res.status(409).json({ message: "You are already part of a team for this event" });
     }
 
     const inviteCode = `${event._id.toString().slice(-4)}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -320,7 +498,7 @@ router.post(
       leader: req.user._id,
       name: teamName || `${req.user.firstName || "Team"}'s Team`,
       inviteCode,
-      maxMembers: Number(maxMembers) || event.teamConfig.maxMembers,
+      maxMembers: requestedMaxMembers,
       members: [{ participant: req.user._id, status: "accepted", joinedAt: new Date() }],
     });
 
@@ -339,9 +517,26 @@ router.post(
       return res.status(400).json({ message: "Team registration is not enabled for this event" });
     }
 
+    if (!["published", "ongoing"].includes(event.status)) {
+      return res.status(400).json({ message: "Team registration is not open for this event" });
+    }
+
+    if (new Date(event.registrationDeadline) < new Date()) {
+      return res.status(400).json({ message: "Registration deadline has passed" });
+    }
+
     const team = await Team.findOne({ event: event._id, inviteCode });
     if (!team || team.status !== "forming") {
       return res.status(404).json({ message: "Team not found or not accepting members" });
+    }
+
+    const existingMembership = await Team.findOne({
+      event: event._id,
+      status: { $ne: "cancelled" },
+      "members.participant": req.user._id,
+    });
+    if (existingMembership && String(existingMembership._id) !== String(team._id)) {
+      return res.status(409).json({ message: "You are already part of another team for this event" });
     }
 
     const alreadyMember = team.members.some((member) => String(member.participant) === String(req.user._id));
@@ -396,6 +591,23 @@ router.post(
     await team.save();
 
     return res.json({ message: "Joined team", team });
+  })
+);
+
+router.get(
+  "/:id/team/my",
+  requireAuth,
+  allowRoles("participant"),
+  asyncHandler(async (req, res) => {
+    const team = await Team.findOne({
+      event: req.params.id,
+      $or: [{ leader: req.user._id }, { "members.participant": req.user._id }, { "invites.email": req.user.email }],
+    })
+      .populate("leader", "firstName lastName email")
+      .populate("members.participant", "firstName lastName email")
+      .populate("invites.participant", "firstName lastName email");
+
+    return res.json({ team });
   })
 );
 

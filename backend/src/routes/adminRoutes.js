@@ -2,9 +2,11 @@ const express = require("express");
 const User = require("../models/User");
 const Event = require("../models/Event");
 const PasswordResetRequest = require("../models/PasswordResetRequest");
+const SecurityEvent = require("../models/SecurityEvent");
 const { requireAuth, allowRoles } = require("../middlewares/auth");
 const asyncHandler = require("../utils/asyncHandler");
 const { randomPassword } = require("../utils/validators");
+const { getBlockedIpsSnapshot } = require("../services/securityService");
 
 const router = express.Router();
 
@@ -21,13 +23,57 @@ function generateOrganizerEmail(name = "club") {
 router.get(
   "/dashboard",
   asyncHandler(async (req, res) => {
-    const [organizers, activeEvents, pendingResetRequests] = await Promise.all([
+    const [organizers, activeEvents, pendingResetRequests, securityEventsLast24h] = await Promise.all([
       User.countDocuments({ role: "organizer" }),
       Event.countDocuments({ archived: false, status: { $in: ["published", "ongoing"] } }),
       PasswordResetRequest.countDocuments({ status: "pending" }),
+      SecurityEvent.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
     ]);
 
-    return res.json({ organizers, activeEvents, pendingResetRequests });
+    const blockedIps = getBlockedIpsSnapshot();
+    return res.json({ organizers, activeEvents, pendingResetRequests, securityEventsLast24h, blockedIps: blockedIps.length });
+  })
+);
+
+router.get(
+  "/security-events",
+  asyncHandler(async (req, res) => {
+    const { type, ip, email, page = 1, limit = 50 } = req.query;
+
+    const filters = {};
+    if (type) {
+      filters.type = type;
+    }
+    if (ip) {
+      filters.ip = new RegExp(String(ip), "i");
+    }
+    if (email) {
+      filters.email = new RegExp(String(email), "i");
+    }
+
+    const pageNum = Math.max(Number(page) || 1, 1);
+    const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 200);
+
+    const [events, total] = await Promise.all([
+      SecurityEvent.find(filters)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      SecurityEvent.countDocuments(filters),
+    ]);
+
+    const blockedIps = getBlockedIpsSnapshot();
+
+    return res.json({
+      events,
+      blockedIps,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
+    });
   })
 );
 
