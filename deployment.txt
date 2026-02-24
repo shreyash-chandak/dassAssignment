@@ -1,2 +1,2 @@
-Frontend URL: TO_BE_DEPLOYED
-Backend API URL: TO_BE_DEPLOYED
+Frontend URL: https://dass-assignment-taupe.vercel.app/
+Backend API URL: https://dassassignment.onrender.com/api
