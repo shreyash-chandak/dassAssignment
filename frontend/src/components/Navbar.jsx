@@ -14,7 +14,6 @@ function Navbar() {
     { to: "/participant/dashboard", label: "Dashboard" },
     { to: "/participant/events", label: "Browse Events" },
     { to: "/participant/clubs", label: "Clubs/Organizers" },
-    { to: "/participant/team-chat", label: "Team Chat" },
     { to: "/participant/profile", label: "Profile" },
   ];
 
@@ -29,7 +28,6 @@ function Navbar() {
     { to: "/admin/dashboard", label: "Dashboard" },
     { to: "/admin/organizers", label: "Manage Clubs/Organizers" },
     { to: "/admin/reset-requests", label: "Password Reset Requests" },
-    { to: "/admin/security", label: "Security Events" },
   ];
 
   const links = user

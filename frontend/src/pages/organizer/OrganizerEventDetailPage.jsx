@@ -3,27 +3,11 @@ import { io } from "socket.io-client";
 import jsQR from "jsqr";
 import { useParams } from "react-router-dom";
 import Card from "../../components/Card";
+import ForumPanel from "../../components/ForumPanel";
 import { API_URL, request } from "../../api/client";
 import { useAuth } from "../../context/AuthContext";
 
-function extractTicketId(raw) {
-  if (!raw) {
-    return "";
-  }
-
-  const trimmed = String(raw).trim();
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (parsed.ticketId) {
-      return parsed.ticketId;
-    }
-  } catch (error) {
-    // ignore non-JSON
-  }
-
-  const match = trimmed.match(/FEL-[A-Z]-[A-Z0-9]{8}/i);
-  return match ? match[0].toUpperCase() : trimmed;
-}
+const SOCKET_URL = API_URL.replace(/\/api\/?$/, "");
 
 function OrganizerEventDetailPage() {
   const { id } = useParams();
@@ -32,109 +16,105 @@ function OrganizerEventDetailPage() {
   const [eventData, setEventData] = useState(null);
   const [edit, setEdit] = useState({ description: "", registrationDeadline: "", registrationLimit: 0, status: "" });
   const [filters, setFilters] = useState({ search: "", payment: "", attendance: "" });
-  const [attendanceForm, setAttendanceForm] = useState({ ticketId: "", manualOverride: false, note: "" });
+  const [attendanceData, setAttendanceData] = useState({ totals: { eligible: 0, scanned: 0, pending: 0 }, scanned: [], pending: [] });
+  const [merchOrders, setMerchOrders] = useState([]);
+  const [merchStatusFilter, setMerchStatusFilter] = useState("pending");
+  const [reviewComment, setReviewComment] = useState("");
+  const [scanInput, setScanInput] = useState("");
+  const [feedbackData, setFeedbackData] = useState({ averageRating: 0, totalFeedback: 0, distribution: [], feedback: [] });
+  const [feedbackRatingFilter, setFeedbackRatingFilter] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const [forumMessages, setForumMessages] = useState([]);
-  const [forumInput, setForumInput] = useState("");
-  const [forumAnnouncement, setForumAnnouncement] = useState(false);
-  const [forumUnread, setForumUnread] = useState(0);
-  const [feedbackData, setFeedbackData] = useState({ summary: { total: 0, averageRating: 0, distribution: [] }, feedback: [] });
-  const [feedbackFilterRating, setFeedbackFilterRating] = useState("");
-
-  const [cameraActive, setCameraActive] = useState(false);
-  const [cameraError, setCameraError] = useState("");
-
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const streamRef = useRef(null);
-  const scannerTimerRef = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const scannerIntervalRef = useRef(null);
 
-  const socketHost = useMemo(() => API_URL.replace(/\/api$/, ""), []);
+  const loadEvent = async () => {
+    try {
+      const [eventResponse, attendanceResponse, feedbackResponse] = await Promise.all([
+        request(`/organizer/events/${id}`, { token }),
+        request(`/organizer/events/${id}/attendance/dashboard`, { token }),
+        request(`/organizer/events/${id}/feedback${feedbackRatingFilter ? `?rating=${feedbackRatingFilter}` : ""}`, { token }),
+      ]);
 
-  const load = () => {
-    request(`/organizer/events/${id}`, { token })
-      .then((data) => {
-        setEventData(data);
-        setEdit({
-          description: data.event.description || "",
-          registrationDeadline: data.event.registrationDeadline?.slice(0, 16) || "",
-          registrationLimit: data.event.registrationLimit || 0,
-          status: data.event.status || "",
-        });
-      })
-      .catch((err) => setError(err.message));
+      setEventData(eventResponse);
+      setEdit({
+        description: eventResponse.event.description || "",
+        registrationDeadline: eventResponse.event.registrationDeadline?.slice(0, 16) || "",
+        registrationLimit: eventResponse.event.registrationLimit || 0,
+        status: eventResponse.event.status || "",
+      });
+      setAttendanceData(attendanceResponse);
+      setFeedbackData(feedbackResponse);
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
-  const loadForum = () => {
-    request(`/forum/${id}/messages`, { token })
-      .then((data) => {
-        setForumMessages(data.messages || []);
-      })
-      .catch((err) => setError(err.message));
-  };
-
-  const loadFeedback = (rating = "") => {
-    const qs = rating ? `?rating=${rating}` : "";
-    request(`/feedback/event/${id}${qs}`, { token })
-      .then((data) => setFeedbackData(data))
-      .catch((err) => setError(err.message));
+  const loadMerchOrders = async () => {
+    try {
+      const response = await request(`/organizer/events/${id}/merch-orders${merchStatusFilter ? `?status=${merchStatusFilter}` : ""}`, { token });
+      setMerchOrders(response.orders || []);
+    } catch (err) {
+      if (!String(err.message || "").toLowerCase().includes("not found")) {
+        setError(err.message);
+      }
+    }
   };
 
   useEffect(() => {
-    load();
-    loadForum();
-    loadFeedback();
+    loadEvent();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, token, feedbackRatingFilter]);
+
+  useEffect(() => {
+    loadMerchOrders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, token, merchStatusFilter, eventData?.event?.eventType]);
+
+  useEffect(() => {
+    if (!id || !token) {
+      return undefined;
+    }
+
+    const socket = io(SOCKET_URL, {
+      auth: { token },
+      transports: ["websocket", "polling"],
+    });
+
+    socket.on("connect", () => {
+      socket.emit("forum:join", { eventId: id });
+    });
+
+    socket.on("attendance:update", (payload) => {
+      setAttendanceData(payload);
+    });
+
+    socket.on("merch:payment_update", () => {
+      loadEvent();
+      loadMerchOrders();
+    });
+
+    return () => {
+      socket.emit("forum:leave", { eventId: id });
+      socket.disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, token]);
 
-  useEffect(() => {
-    const socket = io(socketHost, { auth: { token } });
-    socket.emit("forum:join", { eventId: id });
-
-    socket.on("forum:new-message", (incoming) => {
-      setForumMessages((prev) => {
-        if (prev.some((msg) => msg._id === incoming._id)) {
-          return prev;
-        }
-        return [...prev, incoming];
-      });
-      setForumUnread((prev) => prev + 1);
-    });
-
-    socket.on("forum:message-updated", (updated) => {
-      setForumMessages((prev) => prev.map((msg) => (msg._id === updated._id ? { ...msg, ...updated } : msg)));
-    });
-
-    socket.on("forum:message-deleted", ({ messageId }) => {
-      setForumMessages((prev) => prev.filter((msg) => msg._id !== messageId));
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, [id, socketHost, token]);
-
-  const stopCameraScan = () => {
-    if (scannerTimerRef.current) {
-      clearInterval(scannerTimerRef.current);
-      scannerTimerRef.current = null;
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    setCameraActive(false);
-  };
-
-  useEffect(() => {
-    return () => {
-      stopCameraScan();
-    };
-  }, []);
+  useEffect(
+    () => () => {
+      if (scannerIntervalRef.current) {
+        clearInterval(scannerIntervalRef.current);
+      }
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    },
+    []
+  );
 
   const filteredParticipants = useMemo(() => {
     if (!eventData) {
@@ -153,6 +133,11 @@ function OrganizerEventDetailPage() {
       });
   }, [eventData, filters]);
 
+  const refreshAll = async () => {
+    await loadEvent();
+    await loadMerchOrders();
+  };
+
   const saveEdits = async () => {
     setError("");
     setMessage("");
@@ -168,7 +153,7 @@ function OrganizerEventDetailPage() {
         },
       });
       setMessage(data.message || "Event updated");
-      load();
+      refreshAll();
     } catch (err) {
       setError(err.message);
     }
@@ -183,129 +168,60 @@ function OrganizerEventDetailPage() {
         token,
       });
       setMessage(data.message || "Published");
-      load();
+      refreshAll();
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const decideOrder = async (registrationId, decision) => {
+  const reviewOrder = async (registrationId, action) => {
+    setError("");
+    setMessage("");
     try {
-      const data = await request(`/organizer/orders/${registrationId}/decision`, {
-        method: "POST",
-        token,
-        data: { decision },
-      });
-      setMessage(data.message);
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const markAttendance = async () => {
-    try {
-      const data = await request("/organizer/attendance/scan", {
-        method: "POST",
-        token,
-        data: attendanceForm,
-      });
-      setMessage(data.message);
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const postForumMessage = async () => {
-    if (!forumInput.trim()) {
-      return;
-    }
-
-    try {
-      await request(`/forum/${id}/messages`, {
-        method: "POST",
-        token,
-        data: { content: forumInput, isAnnouncement: forumAnnouncement },
-      });
-      setForumInput("");
-      setForumAnnouncement(false);
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const togglePin = async (messageId) => {
-    try {
-      await request(`/forum/${id}/messages/${messageId}/pin`, {
+      const data = await request(`/organizer/registrations/${registrationId}/payment`, {
         method: "PATCH",
         token,
+        data: { action, comment: reviewComment },
       });
+      setMessage(data.message || "Order reviewed");
+      setReviewComment("");
+      refreshAll();
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const deleteMessage = async (messageId) => {
+  const scanTicket = async ({ ticketId, qrPayload, source }) => {
+    setError("");
+    setMessage("");
     try {
-      await request(`/forum/${id}/messages/${messageId}`, {
-        method: "DELETE",
+      const data = await request(`/organizer/events/${id}/attendance/scan`, {
+        method: "POST",
         token,
+        data: { ticketId, qrPayload, source },
       });
+      setMessage(data.message || "Attendance marked");
+      setScanInput("");
+      refreshAll();
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const updateFeedbackFilter = (value) => {
-    setFeedbackFilterRating(value);
-    loadFeedback(value);
-  };
-
-  const startCameraScan = async () => {
+  const markManualAttendance = async (registrationId, present) => {
+    setError("");
+    setMessage("");
     try {
-      setCameraError("");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "environment",
-        },
+      const data = await request(`/organizer/registrations/${registrationId}/attendance/manual`, {
+        method: "POST",
+        token,
+        data: { present, note: "Manual organizer override" },
       });
-
-      streamRef.current = stream;
-      setCameraActive(true);
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      scannerTimerRef.current = setInterval(() => {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        if (!video || !canvas || video.readyState < 2) {
-          return;
-        }
-
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (!ctx) {
-          return;
-        }
-
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const decoded = jsQR(imageData.data, canvas.width, canvas.height);
-        if (decoded?.data) {
-          const ticketId = extractTicketId(decoded.data);
-          setAttendanceForm((prev) => ({ ...prev, ticketId }));
-          setMessage(`QR decoded: ${ticketId}`);
-          stopCameraScan();
-        }
-      }, 250);
+      setMessage(data.message || "Attendance updated");
+      setAttendanceData((prev) => ({ ...prev, totals: data.totals || prev.totals }));
+      refreshAll();
     } catch (err) {
-      setCameraError(err.message || "Could not access camera");
-      stopCameraScan();
+      setError(err.message);
     }
   };
 
@@ -314,41 +230,78 @@ function OrganizerEventDetailPage() {
       return;
     }
 
+    const reader = new FileReader();
+    reader.onload = () => {
+      const image = new Image();
+      image.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        const imageData = context.getImageData(0, 0, image.width, image.height);
+        const result = jsQR(imageData.data, imageData.width, imageData.height);
+        if (!result) {
+          setError("Could not decode QR from file");
+          return;
+        }
+        scanTicket({ qrPayload: result.data, source: "file-upload" });
+      };
+      image.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const stopCameraScanner = () => {
+    if (scannerIntervalRef.current) {
+      clearInterval(scannerIntervalRef.current);
+      scannerIntervalRef.current = null;
+    }
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => track.stop());
+      cameraStreamRef.current = null;
+    }
+  };
+
+  const startCameraScanner = async () => {
+    setError("");
     try {
-      const bitmap = await createImageBitmap(file);
-      const canvas = canvasRef.current || document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) {
-        throw new Error("Unable to read image data");
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      cameraStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
       }
 
-      ctx.drawImage(bitmap, 0, 0);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const decoded = jsQR(imageData.data, canvas.width, canvas.height);
-      if (!decoded?.data) {
-        throw new Error("No QR code found in image");
+      if (scannerIntervalRef.current) {
+        clearInterval(scannerIntervalRef.current);
       }
 
-      const ticketId = extractTicketId(decoded.data);
-      setAttendanceForm((prev) => ({ ...prev, ticketId }));
-      setMessage(`QR decoded from file: ${ticketId}`);
+      scannerIntervalRef.current = setInterval(() => {
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        if (!video || !canvas || video.readyState < 2) {
+          return;
+        }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const context = canvas.getContext("2d");
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code?.data) {
+          stopCameraScanner();
+          scanTicket({ qrPayload: code.data, source: "camera" });
+        }
+      }, 700);
     } catch (err) {
-      setCameraError(err.message || "Unable to decode QR image");
+      setError(`Camera start failed: ${err.message}`);
     }
   };
 
   if (!eventData) {
     return <div className="container">Loading event...</div>;
   }
-
-  const merchandiseOrders = (eventData.participants || []).filter((p) => p.eventType === "merchandise");
-  const orderSummary = {
-    pending: merchandiseOrders.filter((order) => order.status === "pending_approval").length,
-    approved: merchandiseOrders.filter((order) => order.status === "approved").length,
-    rejected: merchandiseOrders.filter((order) => order.status === "rejected").length,
-  };
 
   return (
     <div className="container">
@@ -376,10 +329,6 @@ function OrganizerEventDetailPage() {
           <article className="stat">
             <h4>Attendance</h4>
             <p>{eventData.analytics.attendance}</p>
-          </article>
-          <article className="stat">
-            <h4>Not Scanned</h4>
-            <p>{Math.max((eventData.analytics.registrations || 0) - (eventData.analytics.attendance || 0), 0)}</p>
           </article>
           <article className="stat">
             <h4>Team Completion</h4>
@@ -440,217 +389,106 @@ function OrganizerEventDetailPage() {
           >
             Export Participants CSV
           </a>
+        </div>
+      </Card>
+
+      {eventData.event.eventType === "merchandise" && (
+        <Card title="Merchandise Payment Approval">
+          <div className="row">
+            <label>
+              Status Filter
+              <select value={merchStatusFilter} onChange={(e) => setMerchStatusFilter(e.target.value)}>
+                <option value="">All</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </label>
+            <label>
+              Review Comment
+              <input value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} />
+            </label>
+          </div>
+          <div className="list">
+            {merchOrders.map((order) => (
+              <article className="item" key={order.id}>
+                <p>
+                  <strong>{order.participant.name}</strong> ({order.participant.email})
+                </p>
+                <p>Status: {order.paymentStatus}</p>
+                <p>Amount: {order.amountPaid}</p>
+                <p>Items: {(order.selections || []).map((s) => `${s.name} x${s.quantity}`).join(", ")}</p>
+                <p>
+                  Payment Proof:{" "}
+                  {order.paymentProofUrl ? (
+                    <a href={order.paymentProofUrl} target="_blank" rel="noreferrer">
+                      Open
+                    </a>
+                  ) : (
+                    "N/A"
+                  )}
+                </p>
+                {order.paymentStatus === "pending" && (
+                  <div className="row">
+                    <button type="button" className="btn" onClick={() => reviewOrder(order.id, "approve")}>
+                      Approve
+                    </button>
+                    <button type="button" className="btn btn-light" onClick={() => reviewOrder(order.id, "reject")}>
+                      Reject
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
+            {!merchOrders.length && <p>No orders for selected filter.</p>}
+          </div>
+        </Card>
+      )}
+
+      <Card title="Attendance Scanner & Live Dashboard">
+        <div className="stats-grid">
+          <article className="stat">
+            <h4>Eligible</h4>
+            <p>{attendanceData.totals?.eligible || 0}</p>
+          </article>
+          <article className="stat">
+            <h4>Scanned</h4>
+            <p>{attendanceData.totals?.scanned || 0}</p>
+          </article>
+          <article className="stat">
+            <h4>Pending</h4>
+            <p>{attendanceData.totals?.pending || 0}</p>
+          </article>
+        </div>
+        <div className="row">
+          <input
+            placeholder="Manual ticket ID"
+            value={scanInput}
+            onChange={(e) => setScanInput(e.target.value)}
+          />
+          <button type="button" className="btn" onClick={() => scanTicket({ ticketId: scanInput, source: "manual-ticket-input" })}>
+            Scan by Ticket ID
+          </button>
+          <input type="file" accept="image/*" onChange={(e) => decodeQrFromFile(e.target.files?.[0])} />
+        </div>
+        <div className="row">
+          <button type="button" className="btn btn-light" onClick={startCameraScanner}>
+            Start Camera Scan
+          </button>
+          <button type="button" className="btn btn-light" onClick={stopCameraScanner}>
+            Stop Camera
+          </button>
           <a
             className="btn btn-light"
-            href={`${API_URL}/organizer/events/${id}/attendance-report?token=${encodeURIComponent(token || "")}`}
+            href={`${API_URL}/organizer/events/${id}/attendance/dashboard?export=csv&token=${encodeURIComponent(token || "")}`}
             target="_blank"
             rel="noreferrer"
           >
             Export Attendance CSV
           </a>
         </div>
-      </Card>
-
-      <Card title={`Forum Moderation${forumUnread > 0 ? ` (New: ${forumUnread})` : ""}`}>
-        <div className="row">
-          <button type="button" className="btn btn-light" onClick={() => setForumUnread(0)}>
-            Mark Seen
-          </button>
-          <button type="button" className="btn btn-light" onClick={loadForum}>
-            Refresh
-          </button>
-        </div>
-
-        <div className="list">
-          {forumMessages.map((forumMessage) => (
-            <article className="item" key={forumMessage._id}>
-              <p>
-                <strong>
-                  {forumMessage.user?.organizerName ||
-                    `${forumMessage.user?.firstName || ""} ${forumMessage.user?.lastName || ""}`.trim()}
-                </strong>
-                {forumMessage.isPinned ? " (Pinned)" : ""}
-                {forumMessage.isAnnouncement ? " (Announcement)" : ""}
-              </p>
-              <p>{forumMessage.content}</p>
-              <p className="muted">{new Date(forumMessage.createdAt).toLocaleString()}</p>
-              <div className="row">
-                <button type="button" className="btn btn-light" onClick={() => togglePin(forumMessage._id)}>
-                  {forumMessage.isPinned ? "Unpin" : "Pin"}
-                </button>
-                <button type="button" className="btn" onClick={() => deleteMessage(forumMessage._id)}>
-                  Delete
-                </button>
-              </div>
-            </article>
-          ))}
-          {!forumMessages.length && <p>No forum messages yet.</p>}
-        </div>
-
-        <label>
-          Post as organizer
-          <textarea value={forumInput} onChange={(e) => setForumInput(e.target.value)} rows={3} />
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={forumAnnouncement} onChange={(e) => setForumAnnouncement(e.target.checked)} />
-          Post as announcement
-        </label>
-        <button type="button" className="btn" onClick={postForumMessage}>
-          Post Message
-        </button>
-      </Card>
-
-      <Card title="Anonymous Feedback Analytics">
-        <div className="stats-grid">
-          <article className="stat">
-            <h4>Total Feedback</h4>
-            <p>{feedbackData.summary?.total || 0}</p>
-          </article>
-          <article className="stat">
-            <h4>Average Rating</h4>
-            <p>{Number(feedbackData.summary?.averageRating || 0).toFixed(2)}</p>
-          </article>
-        </div>
-        <p className="muted">
-          Distribution: {(feedbackData.summary?.distribution || []).map((d) => `${d.rating}*:${d.count}`).join(" | ") || "-"}
-        </p>
-        <div className="row">
-          <label>
-            Filter by Rating
-            <select value={feedbackFilterRating} onChange={(e) => updateFeedbackFilter(e.target.value)}>
-              <option value="">All</option>
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-              <option value="5">5</option>
-            </select>
-          </label>
-          <a
-            className="btn btn-light"
-            href={`${API_URL}/feedback/event/${id}?export=csv&token=${encodeURIComponent(token || "")}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Export Feedback CSV
-          </a>
-        </div>
-        <div className="list">
-          {(feedbackData.feedback || []).map((entry, idx) => (
-            <article key={`${entry.createdAt}-${idx}`} className="item">
-              <p>Rating: {entry.rating} / 5</p>
-              <p>{entry.comment || "No comment"}</p>
-              <p className="muted">{new Date(entry.createdAt).toLocaleString()}</p>
-            </article>
-          ))}
-          {!feedbackData.feedback?.length && <p>No feedback records yet.</p>}
-        </div>
-      </Card>
-
-      <Card title="Merchandise Payment Orders">
-        <p className="muted">
-          Pending: {orderSummary.pending} | Approved: {orderSummary.approved} | Rejected: {orderSummary.rejected}
-        </p>
-        <div className="list">
-          {merchandiseOrders.map((order) => (
-            <article className="item" key={order.id}>
-              <p>
-                {order.name} ({order.email}) | Payment: {order.payment} | Status: {order.status}
-              </p>
-              <p>
-                Order Items:{" "}
-                {(order.merchandiseSelections || [])
-                  .map((item) => `${item.name} x${item.quantity}`)
-                  .join(", ") || "-"}
-              </p>
-              <p>Ticket: {order.ticketId || "Not generated"}</p>
-              <p>
-                Proof:{" "}
-                {order.paymentProofUrl ? (
-                  <a href={order.paymentProofUrl} target="_blank" rel="noreferrer">
-                    View Uploaded Proof
-                  </a>
-                ) : (
-                  "Not provided"
-                )}
-              </p>
-              {order.status === "pending_approval" && (
-                <div className="row">
-                  <button type="button" className="btn" onClick={() => decideOrder(order.id, "approved")}>
-                    Approve
-                  </button>
-                  <button type="button" className="btn btn-light" onClick={() => decideOrder(order.id, "rejected")}>
-                    Reject
-                  </button>
-                </div>
-              )}
-            </article>
-          ))}
-          {!merchandiseOrders.length && <p>No merchandise orders for this event.</p>}
-        </div>
-      </Card>
-
-      <Card title="QR Attendance Scanner">
-        <div className="grid two">
-          <label>
-            Ticket ID
-            <input
-              value={attendanceForm.ticketId}
-              onChange={(e) => setAttendanceForm((p) => ({ ...p, ticketId: e.target.value }))}
-            />
-          </label>
-          <label>
-            Note
-            <input value={attendanceForm.note} onChange={(e) => setAttendanceForm((p) => ({ ...p, note: e.target.value }))} />
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={attendanceForm.manualOverride}
-              onChange={(e) => setAttendanceForm((p) => ({ ...p, manualOverride: e.target.checked }))}
-            />
-            Manual Override
-          </label>
-        </div>
-
-        <div className="row">
-          {!cameraActive ? (
-            <button type="button" className="btn btn-light" onClick={startCameraScan}>
-              Start Camera Scan
-            </button>
-          ) : (
-            <button type="button" className="btn btn-light" onClick={stopCameraScan}>
-              Stop Camera
-            </button>
-          )}
-
-          <label className="btn btn-light" style={{ display: "inline-block", cursor: "pointer" }}>
-            Scan from Image
-            <input
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={(e) => decodeQrFromFile(e.target.files?.[0])}
-            />
-          </label>
-        </div>
-
-        {cameraError && <p className="error">{cameraError}</p>}
-
-        {cameraActive && (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            style={{ width: "100%", maxWidth: "420px", border: "1px solid #d9e0ea", borderRadius: "0.5rem" }}
-          />
-        )}
+        <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", maxWidth: "400px" }} />
         <canvas ref={canvasRef} style={{ display: "none" }} />
-
-        <button className="btn" type="button" onClick={markAttendance}>
-          Mark Attendance
-        </button>
       </Card>
 
       <Card title="Participants">
@@ -663,8 +501,8 @@ function OrganizerEventDetailPage() {
             Payment
             <select value={filters.payment} onChange={(e) => setFilters((p) => ({ ...p, payment: e.target.value }))}>
               <option value="">All</option>
-              <option value="pending">pending</option>
               <option value="approved">approved</option>
+              <option value="pending">pending</option>
               <option value="rejected">rejected</option>
               <option value="na">na</option>
             </select>
@@ -691,6 +529,7 @@ function OrganizerEventDetailPage() {
                 <th>Attendance</th>
                 <th>Status</th>
                 <th>Ticket</th>
+                <th>Override</th>
               </tr>
             </thead>
             <tbody>
@@ -704,10 +543,59 @@ function OrganizerEventDetailPage() {
                   <td>{p.attendance ? "Present" : "Absent"}</td>
                   <td>{p.status}</td>
                   <td>{p.ticketId || "Pending"}</td>
+                  <td>
+                    <div className="row">
+                      <button type="button" className="btn btn-light" onClick={() => markManualAttendance(p.id, true)}>
+                        Present
+                      </button>
+                      <button type="button" className="btn btn-light" onClick={() => markManualAttendance(p.id, false)}>
+                        Absent
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {!filteredParticipants.length && <p>No participants found for selected filters.</p>}
+        </div>
+      </Card>
+
+      <ForumPanel eventId={id} token={token} canPost canModerate />
+
+      <Card title="Anonymous Feedback Analytics">
+        <div className="row">
+          <label>
+            Filter by Rating
+            <select value={feedbackRatingFilter} onChange={(e) => setFeedbackRatingFilter(e.target.value)}>
+              <option value="">All</option>
+              <option value="5">5</option>
+              <option value="4">4</option>
+              <option value="3">3</option>
+              <option value="2">2</option>
+              <option value="1">1</option>
+            </select>
+          </label>
+          <p>
+            Average: {feedbackData.averageRating} / 5 ({feedbackData.totalFeedback} responses)
+          </p>
+        </div>
+        <div className="row">
+          {(feedbackData.distribution || []).map((bucket) => (
+            <span key={bucket.rating}>
+              {bucket.rating}*: {bucket.count}
+            </span>
+          ))}
+        </div>
+        <div className="list">
+          {(feedbackData.feedback || []).map((row) => (
+            <article className="item" key={row.id}>
+              <p>{row.rating}/5</p>
+              <p>{row.comment || "(no comment)"}</p>
+              <p className="muted">{new Date(row.createdAt).toLocaleString()}</p>
+            </article>
+          ))}
+          {!feedbackData.feedback?.length && <p>No feedback yet.</p>}
         </div>
       </Card>
     </div>

@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { request } from "../api/client";
 
 function RegisterPage() {
   const { registerParticipant } = useAuth();
@@ -15,22 +14,10 @@ function RegisterPage() {
     participantType: "iiit",
     collegeOrOrg: "",
     contactNumber: "",
-    captchaAnswer: "",
   });
-  const [captcha, setCaptcha] = useState({ captchaId: "", challenge: "" });
 
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const fetchCaptcha = () => {
-    request("/security/captcha")
-      .then((data) => setCaptcha({ captchaId: data.captchaId, challenge: data.challenge }))
-      .catch((err) => setError(err.message));
-  };
-
-  useEffect(() => {
-    fetchCaptcha();
-  }, []);
 
   const onChange = (e) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
@@ -50,14 +37,10 @@ function RegisterPage() {
         participantType: form.participantType,
         collegeOrOrg: form.collegeOrOrg,
         contactNumber: form.contactNumber,
-        captchaId: captcha.captchaId,
-        captchaAnswer: form.captchaAnswer,
       });
       navigate("/participant/onboarding");
     } catch (err) {
       setError(err.message);
-      fetchCaptcha();
-      setForm((prev) => ({ ...prev, captchaAnswer: "" }));
     } finally {
       setLoading(false);
     }
@@ -98,13 +81,6 @@ function RegisterPage() {
           Contact Number
           <input name="contactNumber" value={form.contactNumber} onChange={onChange} />
         </label>
-        <label>
-          CAPTCHA: {captcha.challenge || "Loading..."}
-          <input name="captchaAnswer" value={form.captchaAnswer} onChange={onChange} required />
-        </label>
-        <button type="button" className="btn btn-light" onClick={fetchCaptcha}>
-          Refresh CAPTCHA
-        </button>
         {error && <p className="error">{error}</p>}
         <button className="btn" type="submit" disabled={loading}>
           {loading ? "Creating account..." : "Register"}

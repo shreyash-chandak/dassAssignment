@@ -15,9 +15,6 @@ const initialForm = {
   registrationFee: 0,
   tags: "",
   purchaseLimitPerParticipant: 1,
-  paymentApprovalRequired: false,
-  teamEnabled: false,
-  teamSize: 1,
 };
 
 function OrganizerCreateEventPage() {
@@ -29,8 +26,8 @@ function OrganizerCreateEventPage() {
   const [error, setError] = useState("");
 
   const onChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setForm((prev) => ({ ...prev, [name]: type === "checkbox" ? checked : value }));
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
   };
 
   const addCustomField = () => {
@@ -59,7 +56,7 @@ function OrganizerCreateEventPage() {
 
   const customFieldView = useMemo(
     () =>
-      customFields.map((field, idx) => ({
+      customFields.map((field) => ({
         ...field,
         options: field.options
           ? field.options
@@ -92,12 +89,6 @@ function OrganizerCreateEventPage() {
         customFormFields: form.eventType === "normal" ? customFieldView : [],
         merchandiseItems: form.eventType === "merchandise" ? merchItems : [],
         purchaseLimitPerParticipant: Number(form.purchaseLimitPerParticipant),
-        paymentApprovalRequired: Boolean(form.paymentApprovalRequired),
-        teamConfig: {
-          enabled: Boolean(form.teamEnabled),
-          maxMembers: Number(form.teamSize),
-          inviteMode: "code",
-        },
       };
 
       const data = await request("/organizer/events", {
@@ -169,17 +160,6 @@ function OrganizerCreateEventPage() {
         </div>
       </Card>
 
-      <Card title="Team Registration (Hackathon Feature)">
-        <label className="checkbox">
-          <input type="checkbox" name="teamEnabled" checked={form.teamEnabled} onChange={onChange} />
-          Enable team registration
-        </label>
-        <label>
-          Team Size
-          <input type="number" min="1" name="teamSize" value={form.teamSize} onChange={onChange} />
-        </label>
-      </Card>
-
       {form.eventType === "normal" && (
         <Card title="Dynamic Form Builder">
           <button className="btn btn-light" type="button" onClick={addCustomField}>
@@ -247,15 +227,6 @@ function OrganizerCreateEventPage() {
 
       {form.eventType === "merchandise" && (
         <Card title="Merchandise Items">
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              name="paymentApprovalRequired"
-              checked={form.paymentApprovalRequired}
-              onChange={onChange}
-            />
-            Enable payment approval workflow
-          </label>
           <label>
             Purchase Limit Per Participant
             <input

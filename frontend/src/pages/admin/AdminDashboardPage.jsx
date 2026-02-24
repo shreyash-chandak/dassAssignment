@@ -9,8 +9,6 @@ function AdminDashboardPage() {
     organizers: 0,
     activeEvents: 0,
     pendingResetRequests: 0,
-    securityEventsLast24h: 0,
-    blockedIps: 0,
   });
   const [error, setError] = useState("");
 
@@ -37,14 +35,6 @@ function AdminDashboardPage() {
           <article className="stat">
             <h4>Pending Reset Requests</h4>
             <p>{stats.pendingResetRequests}</p>
-          </article>
-          <article className="stat">
-            <h4>Security Events (24h)</h4>
-            <p>{stats.securityEventsLast24h}</p>
-          </article>
-          <article className="stat">
-            <h4>Blocked IPs</h4>
-            <p>{stats.blockedIps}</p>
           </article>
         </div>
       </Card>

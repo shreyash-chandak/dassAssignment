@@ -1,28 +1,14 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { request } from "../api/client";
 
 function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const [form, setForm] = useState({ email: "", password: "", captchaAnswer: "" });
-  const [captcha, setCaptcha] = useState({ captchaId: "", challenge: "" });
+  const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
-  const fetchCaptcha = () => {
-    request("/security/captcha")
-      .then((data) => {
-        setCaptcha({ captchaId: data.captchaId, challenge: data.challenge });
-      })
-      .catch((err) => setError(err.message));
-  };
-
-  useEffect(() => {
-    fetchCaptcha();
-  }, []);
 
   const onChange = (e) => setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
 
@@ -31,18 +17,13 @@ function LoginPage() {
     setError("");
     setLoading(true);
     try {
-      const payload = {
+      const data = await login({
         email: form.email,
         password: form.password,
-        captchaId: captcha.captchaId,
-        captchaAnswer: form.captchaAnswer,
-      };
-      const data = await login(payload);
+      });
       navigate(data.redirectTo || `/${data.user.role}/dashboard`);
     } catch (err) {
       setError(err.message);
-      fetchCaptcha();
-      setForm((prev) => ({ ...prev, captchaAnswer: "" }));
     } finally {
       setLoading(false);
     }
@@ -60,13 +41,6 @@ function LoginPage() {
           Password
           <input type="password" name="password" value={form.password} onChange={onChange} required />
         </label>
-        <label>
-          CAPTCHA: {captcha.challenge || "Loading..."}
-          <input name="captchaAnswer" value={form.captchaAnswer} onChange={onChange} required />
-        </label>
-        <button type="button" className="btn btn-light" onClick={fetchCaptcha}>
-          Refresh CAPTCHA
-        </button>
         {error && <p className="error">{error}</p>}
         <button className="btn" type="submit" disabled={loading}>
           {loading ? "Logging in..." : "Login"}

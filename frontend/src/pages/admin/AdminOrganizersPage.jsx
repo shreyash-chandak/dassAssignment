@@ -9,6 +9,8 @@ const initialForm = {
   description: "",
   contactEmail: "",
   contactNumber: "",
+  email: "",
+  password: "",
 };
 
 function AdminOrganizersPage() {
@@ -103,6 +105,14 @@ function AdminOrganizersPage() {
           <label>
             Contact Number
             <input name="contactNumber" value={form.contactNumber} onChange={onChange} />
+          </label>
+          <label>
+            Login Email
+            <input name="email" value={form.email} onChange={onChange} />
+          </label>
+          <label>
+            Login Password
+            <input name="password" type="text" value={form.password} onChange={onChange} />
           </label>
         </div>
         <button className="btn" type="button" onClick={createOrganizer}>

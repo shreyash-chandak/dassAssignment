@@ -6,8 +6,9 @@ import { useAuth } from "../../context/AuthContext";
 function AdminResetRequestsPage() {
   const { token } = useAuth();
   const [requests, setRequests] = useState([]);
-  const [error, setError] = useState("");
+  const [commentById, setCommentById] = useState({});
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   const load = () => {
     request("/admin/password-reset-requests", { token })
@@ -20,22 +21,22 @@ function AdminResetRequestsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  const processRequest = async (id, decision) => {
+  const resolveRequest = async (id, action) => {
     setError("");
     setMessage("");
     try {
-      const data = await request(`/admin/password-reset-requests/${id}`, {
+      const response = await request(`/admin/password-reset-requests/${id}`, {
         method: "PATCH",
         token,
         data: {
-          decision,
-          comment: `${decision} by admin`,
+          action,
+          comment: commentById[id] || "",
         },
       });
-      if (data.credentials) {
-        setMessage(`Approved. New password: ${data.credentials.password}`);
+      if (response.generatedPassword) {
+        setMessage(`Request approved. Generated password: ${response.generatedPassword}`);
       } else {
-        setMessage(data.message);
+        setMessage(response.message || "Request updated");
       }
       load();
     } catch (err) {
@@ -55,45 +56,52 @@ function AdminResetRequestsPage() {
             <thead>
               <tr>
                 <th>Organizer</th>
+                <th>Email</th>
                 <th>Date</th>
                 <th>Reason</th>
                 <th>Status</th>
-                <th>Comment</th>
+                <th>Admin Comment</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {requests.map((req) => (
                 <tr key={req._id}>
-                  <td>{req.organizer?.organizerName || req.organizer?.email}</td>
+                  <td>{req.organizer?.organizerName || "-"}</td>
+                  <td>{req.organizer?.email || "-"}</td>
                   <td>{new Date(req.createdAt).toLocaleString()}</td>
-                  <td>{req.reason}</td>
-                  <td>{req.status}</td>
-                  <td>{req.adminComment || "-"}</td>
+                  <td>{req.reason || "-"}</td>
+                  <td>{req.status || "-"}</td>
                   <td>
-                    <div className="row">
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={req.status !== "pending"}
-                        onClick={() => processRequest(req._id, "approved")}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-light"
-                        disabled={req.status !== "pending"}
-                        onClick={() => processRequest(req._id, "rejected")}
-                      >
-                        Reject
-                      </button>
-                    </div>
+                    {req.status === "pending" ? (
+                      <input
+                        value={commentById[req._id] || ""}
+                        onChange={(e) => setCommentById((prev) => ({ ...prev, [req._id]: e.target.value }))}
+                        placeholder="Comment"
+                      />
+                    ) : (
+                      req.adminComment || "-"
+                    )}
+                  </td>
+                  <td>
+                    {req.status === "pending" ? (
+                      <div className="row">
+                        <button type="button" className="btn" onClick={() => resolveRequest(req._id, "approve")}>
+                          Approve
+                        </button>
+                        <button type="button" className="btn btn-light" onClick={() => resolveRequest(req._id, "reject")}>
+                          Reject
+                        </button>
+                      </div>
+                    ) : (
+                      <span>-</span>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {!requests.length && <p>No reset requests.</p>}
         </div>
       </Card>
     </div>

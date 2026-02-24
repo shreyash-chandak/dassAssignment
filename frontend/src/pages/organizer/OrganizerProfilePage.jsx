@@ -6,7 +6,6 @@ import { useAuth } from "../../context/AuthContext";
 function OrganizerProfilePage() {
   const { token, setUser } = useAuth();
   const [profile, setProfile] = useState(null);
-  const [resetReason, setResetReason] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -40,22 +39,6 @@ function OrganizerProfilePage() {
       setProfile(data.user);
       setUser(data.user);
       setMessage("Profile updated");
-    } catch (err) {
-      setError(err.message);
-    }
-  };
-
-  const requestReset = async () => {
-    setError("");
-    setMessage("");
-    try {
-      await request("/organizer/password-reset-request", {
-        method: "POST",
-        token,
-        data: { reason: resetReason },
-      });
-      setResetReason("");
-      setMessage("Password reset request submitted to admin");
     } catch (err) {
       setError(err.message);
     }
@@ -104,16 +87,6 @@ function OrganizerProfilePage() {
         </div>
         <button className="btn" type="button" onClick={save}>
           Save Profile
-        </button>
-      </Card>
-
-      <Card title="Password Reset Request">
-        <label>
-          Reason
-          <textarea value={resetReason} onChange={(e) => setResetReason(e.target.value)} rows={3} />
-        </label>
-        <button className="btn btn-light" type="button" onClick={requestReset}>
-          Submit Reset Request
         </button>
       </Card>
     </div>
