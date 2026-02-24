@@ -15,18 +15,28 @@ router.use(requireAuth, allowRoles("organizer"));
 
 async function postToDiscord(webhook, payload) {
   if (!webhook) {
-    return;
+    return { skipped: true, reason: "missing_webhook" };
   }
 
   try {
-    await fetch(webhook, {
+    const response = await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      // eslint-disable-next-line no-console
+      console.error(`Discord webhook failed with ${response.status}: ${errorBody}`);
+      return { ok: false, status: response.status, errorBody };
+    }
+
+    return { ok: true, status: response.status };
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error("Discord webhook failed", error.message);
+    return { ok: false, error: error.message };
   }
 }
 
@@ -85,6 +95,18 @@ router.put(
     for (const field of editable) {
       if (field in req.body) {
         req.user[field] = req.body[field];
+      }
+    }
+
+    if (typeof req.user.discordWebhook === "string") {
+      req.user.discordWebhook = req.user.discordWebhook.trim();
+      if (
+        req.user.discordWebhook &&
+        !req.user.discordWebhook.startsWith("https://discord.com/api/webhooks/")
+      ) {
+        return res.status(400).json({
+          message: "Invalid Discord webhook URL format",
+        });
       }
     }
 
@@ -285,11 +307,16 @@ router.post(
     event.status = "published";
     await event.save();
 
-    await postToDiscord(event.organizer.discordWebhook, {
+    const webhookResult = await postToDiscord(event.organizer.discordWebhook, {
       content: `New event published: ${event.name}\nType: ${event.eventType}\nStarts: ${new Date(event.startDate).toLocaleString()}`,
     });
 
-    return res.json({ message: "Event published", event });
+    const message =
+      webhookResult?.ok || webhookResult?.skipped
+        ? "Event published"
+        : "Event published, but Discord webhook delivery failed";
+
+    return res.json({ message, event, webhook: webhookResult });
   })
 );
 
