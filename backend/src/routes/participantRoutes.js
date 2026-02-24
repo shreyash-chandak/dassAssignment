@@ -160,13 +160,12 @@ router.get(
 router.get(
   "/stats",
   asyncHandler(async (req, res) => {
-    const [totalRegistrations, completed, pendingApprovals] = await Promise.all([
+    const [totalRegistrations, completed] = await Promise.all([
       Registration.countDocuments({ participant: req.user._id }),
       Registration.countDocuments({ participant: req.user._id, status: "completed" }),
-      Registration.countDocuments({ participant: req.user._id, status: "pending_approval" }),
     ]);
 
-    return res.json({ totalRegistrations, completed, pendingApprovals });
+    return res.json({ totalRegistrations, completed });
   })
 );
 

@@ -2,13 +2,14 @@ const express = require("express");
 const { requireAuth, allowRoles, optionalAuth } = require("../middlewares/auth");
 const Event = require("../models/Event");
 const Registration = require("../models/Registration");
-const Team = require("../models/Team");
-const User = require("../models/User");
+const ForumMessage = require("../models/ForumMessage");
+const Feedback = require("../models/Feedback");
 const { upload, toPublicUploadUrl } = require("../middlewares/upload");
 const asyncHandler = require("../utils/asyncHandler");
 const { createTicketPayload } = require("../services/ticketService");
 const { sendEmail } = require("../services/emailService");
 const { sortEventsByPreference } = require("../services/recommendationService");
+const { emitToEvent } = require("../services/socketService");
 
 const router = express.Router();
 
@@ -56,6 +57,54 @@ function fuzzyScore(query, target) {
     }
   }
   return best;
+}
+
+function serializeForumMessage(message, viewerId) {
+  return {
+    id: message._id,
+    event: message.event,
+    author: {
+      id: message.author?._id,
+      name:
+        message.author?.role === "organizer"
+          ? message.author?.organizerName
+          : `${message.author?.firstName || ""} ${message.author?.lastName || ""}`.trim(),
+      role: message.authorRole,
+      email: message.author?.email,
+    },
+    parentMessage: message.parentMessage || null,
+    text: message.isDeleted ? "[deleted by organizer]" : message.text,
+    isAnnouncement: message.isAnnouncement,
+    isPinned: message.isPinned,
+    isDeleted: message.isDeleted,
+    reactions: (message.reactions || []).map((reaction) => ({
+      emoji: reaction.emoji,
+      count: (reaction.users || []).length,
+      reacted: (reaction.users || []).some((id) => String(id) === String(viewerId)),
+    })),
+    createdAt: message.createdAt,
+    updatedAt: message.updatedAt,
+  };
+}
+
+async function ensureForumAccess(event, user) {
+  if (user.role === "organizer") {
+    if (String(event.organizer) !== String(user._id)) {
+      return false;
+    }
+    return true;
+  }
+
+  if (user.role !== "participant") {
+    return false;
+  }
+
+  const registration = await Registration.findOne({
+    event: event._id,
+    participant: user._id,
+    status: { $nin: ["cancelled", "rejected"] },
+  }).select("_id");
+  return Boolean(registration);
 }
 
 router.get(
@@ -141,6 +190,221 @@ router.get(
 );
 
 router.get(
+  "/:id/forum/messages",
+  requireAuth,
+  allowRoles("participant", "organizer"),
+  asyncHandler(async (req, res) => {
+    const event = await Event.findById(req.params.id);
+    if (!event || event.archived) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const canAccess = await ensureForumAccess(event, req.user);
+    if (!canAccess) {
+      return res.status(403).json({ message: "You can access forum only for events you are part of" });
+    }
+
+    const messages = await ForumMessage.find({ event: event._id })
+      .populate("author", "firstName lastName organizerName role email")
+      .sort({ isPinned: -1, isAnnouncement: -1, createdAt: 1 });
+
+    return res.json({
+      messages: messages.map((message) => serializeForumMessage(message, req.user._id)),
+    });
+  })
+);
+
+router.post(
+  "/:id/forum/messages",
+  requireAuth,
+  allowRoles("participant", "organizer"),
+  asyncHandler(async (req, res) => {
+    const { text, parentMessage, isAnnouncement = false } = req.body;
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ message: "Message text is required" });
+    }
+
+    const event = await Event.findById(req.params.id);
+    if (!event || event.archived) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const canAccess = await ensureForumAccess(event, req.user);
+    if (!canAccess) {
+      return res.status(403).json({ message: "You can post only for events you are part of" });
+    }
+
+    if (parentMessage) {
+      const parent = await ForumMessage.findOne({ _id: parentMessage, event: event._id }).select("_id");
+      if (!parent) {
+        return res.status(400).json({ message: "Invalid parent message" });
+      }
+    }
+
+    const message = await ForumMessage.create({
+      event: event._id,
+      author: req.user._id,
+      authorRole: req.user.role,
+      parentMessage: parentMessage || null,
+      text: String(text).trim(),
+      isAnnouncement: req.user.role === "organizer" && String(event.organizer) === String(req.user._id) ? Boolean(isAnnouncement) : false,
+    });
+
+    const hydrated = await ForumMessage.findById(message._id).populate("author", "firstName lastName organizerName role email");
+    const payload = serializeForumMessage(hydrated, req.user._id);
+    emitToEvent(event._id, "forum:new_message", { message: payload });
+    return res.status(201).json({ message: payload });
+  })
+);
+
+router.patch(
+  "/:id/forum/messages/:messageId",
+  requireAuth,
+  allowRoles("organizer"),
+  asyncHandler(async (req, res) => {
+    const event = await Event.findOne({ _id: req.params.id, organizer: req.user._id });
+    if (!event || event.archived) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const message = await ForumMessage.findOne({ _id: req.params.messageId, event: event._id }).populate(
+      "author",
+      "firstName lastName organizerName role email"
+    );
+    if (!message) {
+      return res.status(404).json({ message: "Forum message not found" });
+    }
+
+    const { pin, remove } = req.body;
+    if (typeof pin === "boolean") {
+      message.isPinned = pin;
+    }
+    if (remove === true) {
+      message.isDeleted = true;
+      message.deletedBy = req.user._id;
+      message.deletedAt = new Date();
+    }
+
+    await message.save();
+    const payload = serializeForumMessage(message, req.user._id);
+    emitToEvent(event._id, "forum:updated_message", { message: payload });
+    return res.json({ message: payload });
+  })
+);
+
+router.post(
+  "/:id/forum/messages/:messageId/react",
+  requireAuth,
+  allowRoles("participant", "organizer"),
+  asyncHandler(async (req, res) => {
+    const { emoji } = req.body;
+    if (!emoji || !String(emoji).trim()) {
+      return res.status(400).json({ message: "Emoji is required" });
+    }
+
+    const event = await Event.findById(req.params.id);
+    if (!event || event.archived) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    const canAccess = await ensureForumAccess(event, req.user);
+    if (!canAccess) {
+      return res.status(403).json({ message: "Not allowed" });
+    }
+
+    const message = await ForumMessage.findOne({ _id: req.params.messageId, event: event._id });
+    if (!message || message.isDeleted) {
+      return res.status(404).json({ message: "Forum message not found" });
+    }
+
+    const normalizedEmoji = String(emoji).trim();
+    const reaction = message.reactions.find((item) => item.emoji === normalizedEmoji);
+    if (!reaction) {
+      message.reactions.push({
+        emoji: normalizedEmoji,
+        users: [req.user._id],
+      });
+    } else {
+      const existingIndex = reaction.users.findIndex((id) => String(id) === String(req.user._id));
+      if (existingIndex === -1) {
+        reaction.users.push(req.user._id);
+      } else {
+        reaction.users.splice(existingIndex, 1);
+      }
+      if (!reaction.users.length) {
+        message.reactions = message.reactions.filter((item) => item.emoji !== normalizedEmoji);
+      }
+    }
+
+    await message.save();
+    const response = (message.reactions || []).map((item) => ({
+      emoji: item.emoji,
+      count: (item.users || []).length,
+      reacted: (item.users || []).some((id) => String(id) === String(req.user._id)),
+    }));
+
+    emitToEvent(event._id, "forum:reaction_update", {
+      messageId: message._id,
+      reactions: response,
+    });
+
+    return res.json({ reactions: response });
+  })
+);
+
+router.get(
+  "/:id/feedback/me",
+  requireAuth,
+  allowRoles("participant"),
+  asyncHandler(async (req, res) => {
+    const feedback = await Feedback.findOne({ event: req.params.id, participant: req.user._id });
+    return res.json({ feedback });
+  })
+);
+
+router.post(
+  "/:id/feedback",
+  requireAuth,
+  allowRoles("participant"),
+  asyncHandler(async (req, res) => {
+    const { rating, comment = "" } = req.body;
+    if (![1, 2, 3, 4, 5].includes(Number(rating))) {
+      return res.status(400).json({ message: "Rating must be between 1 and 5" });
+    }
+
+    const event = await Event.findById(req.params.id);
+    if (!event || event.archived) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    if (new Date(event.endDate) > new Date()) {
+      return res.status(400).json({ message: "Feedback can be submitted only after event completion" });
+    }
+
+    const registration = await Registration.findOne({
+      event: event._id,
+      participant: req.user._id,
+      status: { $nin: ["cancelled", "rejected"] },
+    }).select("_id");
+    if (!registration) {
+      return res.status(403).json({ message: "Only participants of this event can submit feedback" });
+    }
+
+    const feedback = await Feedback.findOneAndUpdate(
+      { event: event._id, participant: req.user._id },
+      {
+        rating: Number(rating),
+        comment: String(comment || "").trim(),
+        anonymous: true,
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    return res.status(201).json({ message: "Feedback submitted", feedback });
+  })
+);
+
+router.get(
   "/:id",
   optionalAuth,
   asyncHandler(async (req, res) => {
@@ -155,7 +419,6 @@ router.get(
     });
 
     const registrationClosed = new Date(event.registrationDeadline) < new Date() || activeRegistrations >= event.registrationLimit;
-
     const merchandiseStockExhausted =
       event.eventType === "merchandise" &&
       event.merchandiseItems.length > 0 &&
@@ -167,7 +430,7 @@ router.get(
         event: event._id,
         participant: req.user._id,
         status: { $nin: ["cancelled", "rejected"] },
-      }).select("status attendance createdAt ticketId");
+      }).select("status createdAt ticketId paymentStatus paymentProofUrl");
     }
 
     return res.json({
@@ -199,10 +462,6 @@ router.post(
 
     if (!["published", "ongoing"].includes(event.status)) {
       return res.status(400).json({ message: "Event registrations are not open" });
-    }
-
-    if (event.teamConfig?.enabled) {
-      return res.status(400).json({ message: "This event requires team registration" });
     }
 
     if (new Date(event.registrationDeadline) < new Date()) {
@@ -349,6 +608,19 @@ router.post(
       return res.status(400).json({ message: "Purchase deadline has passed" });
     }
 
+    if (!req.file) {
+      return res.status(400).json({ message: "Payment proof image is required" });
+    }
+
+    const existing = await Registration.findOne({
+      event: event._id,
+      participant: req.user._id,
+      status: { $nin: ["rejected", "cancelled"] },
+    });
+    if (existing) {
+      return res.status(409).json({ message: "You have already placed an order for this event" });
+    }
+
     let selections = [];
     if (Array.isArray(req.body.selections)) {
       selections = req.body.selections;
@@ -364,16 +636,8 @@ router.post(
       return res.status(400).json({ message: "At least one merchandise item is required" });
     }
 
-    const existingPurchases = await Registration.find({ event: event._id, participant: req.user._id, status: { $nin: ["rejected", "cancelled"] } });
-    const purchasedCount = existingPurchases.reduce(
-      (acc, reg) =>
-        acc +
-        (reg.merchandiseSelections || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0),
-      0
-    );
-
     const requestQuantity = selections.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
-    if (purchasedCount + requestQuantity > event.purchaseLimitPerParticipant) {
+    if (requestQuantity > event.purchaseLimitPerParticipant) {
       return res.status(400).json({ message: `Purchase limit exceeded. Limit: ${event.purchaseLimitPerParticipant}` });
     }
 
@@ -388,8 +652,8 @@ router.post(
         return res.status(400).json({ message: "Invalid merchandise selection" });
       }
 
-      if (item.stock < quantity) {
-        return res.status(400).json({ message: `${item.name} is out of stock or insufficient` });
+      if (item.stock <= 0) {
+        return res.status(400).json({ message: `${item.name} is out of stock` });
       }
 
       totalAmount += quantity * item.price;
@@ -401,213 +665,22 @@ router.post(
       });
     }
 
-    const paymentProofUrl = req.body.paymentProofUrl || toPublicUploadUrl(req, req.file);
-    if (event.paymentApprovalRequired && !paymentProofUrl) {
-      return res.status(400).json({ message: "Payment proof is required for this merchandise event" });
-    }
-    const requiresApproval = Boolean(event.paymentApprovalRequired || paymentProofUrl);
-
     const registration = await Registration.create({
       event: event._id,
       participant: req.user._id,
       organizer: event.organizer._id,
       eventType: event.eventType,
-      status: requiresApproval ? "pending_approval" : "registered",
+      status: "registered",
       merchandiseSelections: normalizedSelections,
       amountPaid: totalAmount,
-      paymentStatus: requiresApproval ? "pending" : "approved",
-      paymentProofUrl,
+      paymentStatus: "pending",
+      paymentProofUrl: toPublicUploadUrl(req, req.file),
     });
-
-    if (!requiresApproval) {
-      for (const selected of normalizedSelections) {
-        const item = itemMap.get(String(selected.itemId));
-        item.stock -= selected.quantity;
-      }
-
-      const ticketData = await createTicketPayload({ event, participant: req.user, registration });
-      registration.ticketId = ticketData.ticketId;
-      registration.ticketQrData = ticketData.ticketQrData;
-      await event.save();
-      await registration.save();
-
-      await sendEmail({
-        to: req.user.email,
-        subject: `Purchase confirmed: ${event.name}`,
-        text: `Your purchase is confirmed. Ticket ID: ${registration.ticketId}`,
-      });
-    }
 
     return res.status(201).json({
-      message: requiresApproval ? "Purchase submitted for approval" : "Purchase successful",
+      message: "Order placed. Awaiting organizer payment approval.",
       registration,
     });
-  })
-);
-
-router.post(
-  "/:id/team/create",
-  requireAuth,
-  allowRoles("participant"),
-  asyncHandler(async (req, res) => {
-    const { teamName, maxMembers } = req.body;
-    const event = await Event.findById(req.params.id);
-
-    if (!event || !event.teamConfig?.enabled) {
-      return res.status(400).json({ message: "Team registration is not enabled for this event" });
-    }
-
-    if (!["published", "ongoing"].includes(event.status)) {
-      return res.status(400).json({ message: "Team registration is not open for this event" });
-    }
-
-    if (new Date(event.registrationDeadline) < new Date()) {
-      return res.status(400).json({ message: "Registration deadline has passed" });
-    }
-
-    const configuredMaxMembers = Number(event.teamConfig.maxMembers || 1);
-    const requestedMaxMembers = Number(maxMembers) || configuredMaxMembers;
-    if (requestedMaxMembers < 2) {
-      return res.status(400).json({ message: "Team size must be at least 2" });
-    }
-    if (requestedMaxMembers > configuredMaxMembers) {
-      return res.status(400).json({ message: `Team size cannot exceed configured max (${configuredMaxMembers})` });
-    }
-
-    const existingRegistration = await Registration.findOne({
-      event: event._id,
-      participant: req.user._id,
-      status: { $nin: ["cancelled", "rejected"] },
-    });
-    if (existingRegistration) {
-      return res.status(409).json({ message: "You are already registered for this event" });
-    }
-
-    const existingTeam = await Team.findOne({
-      event: event._id,
-      status: { $ne: "cancelled" },
-      $or: [{ leader: req.user._id }, { "members.participant": req.user._id }],
-    });
-    if (existingTeam) {
-      return res.status(409).json({ message: "You are already part of a team for this event" });
-    }
-
-    const inviteCode = `${event._id.toString().slice(-4)}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    const team = await Team.create({
-      event: event._id,
-      leader: req.user._id,
-      name: teamName || `${req.user.firstName || "Team"}'s Team`,
-      inviteCode,
-      maxMembers: requestedMaxMembers,
-      members: [{ participant: req.user._id, status: "accepted", joinedAt: new Date() }],
-    });
-
-    return res.status(201).json({ team });
-  })
-);
-
-router.post(
-  "/:id/team/join",
-  requireAuth,
-  allowRoles("participant"),
-  asyncHandler(async (req, res) => {
-    const { inviteCode } = req.body;
-    const event = await Event.findById(req.params.id).populate("organizer", "email");
-    if (!event || !event.teamConfig?.enabled) {
-      return res.status(400).json({ message: "Team registration is not enabled for this event" });
-    }
-
-    if (!["published", "ongoing"].includes(event.status)) {
-      return res.status(400).json({ message: "Team registration is not open for this event" });
-    }
-
-    if (new Date(event.registrationDeadline) < new Date()) {
-      return res.status(400).json({ message: "Registration deadline has passed" });
-    }
-
-    const team = await Team.findOne({ event: event._id, inviteCode });
-    if (!team || team.status !== "forming") {
-      return res.status(404).json({ message: "Team not found or not accepting members" });
-    }
-
-    const existingMembership = await Team.findOne({
-      event: event._id,
-      status: { $ne: "cancelled" },
-      "members.participant": req.user._id,
-    });
-    if (existingMembership && String(existingMembership._id) !== String(team._id)) {
-      return res.status(409).json({ message: "You are already part of another team for this event" });
-    }
-
-    const alreadyMember = team.members.some((member) => String(member.participant) === String(req.user._id));
-    if (alreadyMember) {
-      return res.status(409).json({ message: "You are already in this team" });
-    }
-
-    if (team.members.length >= team.maxMembers) {
-      return res.status(400).json({ message: "Team is full" });
-    }
-
-    team.members.push({ participant: req.user._id, status: "accepted", joinedAt: new Date() });
-
-    if (team.members.length === team.maxMembers) {
-      team.status = "completed";
-
-      const participants = team.members.map((member) => member.participant);
-      const existingRegistrations = await Registration.find({ event: event._id, participant: { $in: participants } }).select("participant");
-      const existingSet = new Set(existingRegistrations.map((reg) => String(reg.participant)));
-
-      for (const member of team.members) {
-        if (existingSet.has(String(member.participant))) {
-          continue;
-        }
-
-        const registration = await Registration.create({
-          event: event._id,
-          participant: member.participant,
-          organizer: event.organizer._id,
-          team: team._id,
-          teamName: team.name,
-          eventType: event.eventType,
-          status: "registered",
-          paymentStatus: "na",
-        });
-
-        const participantDoc =
-          String(member.participant) === String(req.user._id)
-            ? req.user
-            : await User.findById(member.participant).select("email");
-        const ticketData = await createTicketPayload({
-          event,
-          participant: participantDoc || { _id: member.participant, email: "participant@local" },
-          registration,
-        });
-        registration.ticketId = ticketData.ticketId;
-        registration.ticketQrData = ticketData.ticketQrData;
-        await registration.save();
-      }
-    }
-
-    await team.save();
-
-    return res.json({ message: "Joined team", team });
-  })
-);
-
-router.get(
-  "/:id/team/my",
-  requireAuth,
-  allowRoles("participant"),
-  asyncHandler(async (req, res) => {
-    const team = await Team.findOne({
-      event: req.params.id,
-      $or: [{ leader: req.user._id }, { "members.participant": req.user._id }, { "invites.email": req.user.email }],
-    })
-      .populate("leader", "firstName lastName email")
-      .populate("members.participant", "firstName lastName email")
-      .populate("invites.participant", "firstName lastName email");
-
-    return res.json({ team });
   })
 );
 

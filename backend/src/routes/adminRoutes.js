@@ -2,77 +2,27 @@ const express = require("express");
 const User = require("../models/User");
 const Event = require("../models/Event");
 const PasswordResetRequest = require("../models/PasswordResetRequest");
-const SecurityEvent = require("../models/SecurityEvent");
 const { requireAuth, allowRoles } = require("../middlewares/auth");
 const asyncHandler = require("../utils/asyncHandler");
 const { randomPassword } = require("../utils/validators");
-const { getBlockedIpsSnapshot } = require("../services/securityService");
 
 const router = express.Router();
 
 router.use(requireAuth, allowRoles("admin"));
 
-function generateOrganizerEmail(name = "club") {
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `${slug || "organizer"}-${Date.now().toString().slice(-5)}@felicity.local`;
-}
-
 router.get(
   "/dashboard",
   asyncHandler(async (req, res) => {
-    const [organizers, activeEvents, pendingResetRequests, securityEventsLast24h] = await Promise.all([
+    const [organizers, activeEvents, pendingResetRequests] = await Promise.all([
       User.countDocuments({ role: "organizer" }),
       Event.countDocuments({ archived: false, status: { $in: ["published", "ongoing"] } }),
       PasswordResetRequest.countDocuments({ status: "pending" }),
-      SecurityEvent.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
     ]);
-
-    const blockedIps = getBlockedIpsSnapshot();
-    return res.json({ organizers, activeEvents, pendingResetRequests, securityEventsLast24h, blockedIps: blockedIps.length });
-  })
-);
-
-router.get(
-  "/security-events",
-  asyncHandler(async (req, res) => {
-    const { type, ip, email, page = 1, limit = 50 } = req.query;
-
-    const filters = {};
-    if (type) {
-      filters.type = type;
-    }
-    if (ip) {
-      filters.ip = new RegExp(String(ip), "i");
-    }
-    if (email) {
-      filters.email = new RegExp(String(email), "i");
-    }
-
-    const pageNum = Math.max(Number(page) || 1, 1);
-    const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 200);
-
-    const [events, total] = await Promise.all([
-      SecurityEvent.find(filters)
-        .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * limitNum)
-        .limit(limitNum),
-      SecurityEvent.countDocuments(filters),
-    ]);
-
-    const blockedIps = getBlockedIpsSnapshot();
 
     return res.json({
-      events,
-      blockedIps,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
-      },
+      organizers,
+      activeEvents,
+      pendingResetRequests,
     });
   })
 );
@@ -91,23 +41,26 @@ router.get(
 router.post(
   "/organizers",
   asyncHandler(async (req, res) => {
-    const { organizerName, category, description, contactEmail, contactNumber } = req.body;
-    if (!organizerName || !category || !description) {
-      return res.status(400).json({ message: "organizerName, category, and description are required" });
+    const { organizerName, category, description, contactEmail, contactNumber, email, password } = req.body;
+    if (!organizerName || !category || !description || !email || !password) {
+      return res.status(400).json({ message: "organizerName, category, description, email, and password are required" });
     }
 
-    const email = generateOrganizerEmail(organizerName);
-    const password = randomPassword(12);
+    const normalizedEmail = String(email).toLowerCase().trim();
+    const exists = await User.findOne({ email: normalizedEmail });
+    if (exists) {
+      return res.status(409).json({ message: "Email already in use" });
+    }
 
     const organizer = await User.create({
       role: "organizer",
       organizerName,
       category,
       description,
-      contactEmail: contactEmail || email,
+      contactEmail: contactEmail || normalizedEmail,
       contactNumber,
-      email,
-      password,
+      email: normalizedEmail,
+      password: String(password),
       firstName: organizerName,
       lastName: "",
       isActive: true,
@@ -116,8 +69,8 @@ router.post(
     return res.status(201).json({
       message: "Organizer created",
       credentials: {
-        email,
-        password,
+        email: normalizedEmail,
+        password: String(password),
       },
       organizer: organizer.toSafeJSON(),
     });
@@ -151,6 +104,7 @@ router.delete(
 
     if (permanent === "true") {
       await Event.deleteMany({ organizer: organizer._id });
+      await PasswordResetRequest.deleteMany({ organizer: organizer._id });
       await organizer.deleteOne();
       return res.json({ message: "Organizer and related events deleted permanently" });
     }
@@ -166,9 +120,15 @@ router.delete(
 router.get(
   "/password-reset-requests",
   asyncHandler(async (req, res) => {
-    const requests = await PasswordResetRequest.find()
+    const { status } = req.query;
+    const query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    const requests = await PasswordResetRequest.find(query)
       .populate("organizer", "organizerName email")
-      .populate("processedBy", "email")
+      .populate("resolvedBy", "email")
       .sort({ createdAt: -1 });
 
     return res.json({ requests });
@@ -178,38 +138,45 @@ router.get(
 router.patch(
   "/password-reset-requests/:id",
   asyncHandler(async (req, res) => {
-    const { decision, comment = "" } = req.body;
-    if (!["approved", "rejected"].includes(decision)) {
-      return res.status(400).json({ message: "decision must be approved or rejected" });
+    const { action, comment = "" } = req.body;
+    if (!["approve", "reject"].includes(action)) {
+      return res.status(400).json({ message: "Action must be approve or reject" });
     }
 
     const request = await PasswordResetRequest.findById(req.params.id).populate("organizer");
     if (!request) {
-      return res.status(404).json({ message: "Request not found" });
+      return res.status(404).json({ message: "Reset request not found" });
     }
 
     if (request.status !== "pending") {
-      return res.status(400).json({ message: "Only pending requests can be processed" });
+      return res.status(400).json({ message: "Request is already resolved" });
     }
 
-    request.status = decision;
-    request.adminComment = comment;
-    request.processedBy = req.user._id;
-    request.processedAt = new Date();
+    request.adminComment = String(comment || "").trim();
+    request.resolvedBy = req.user._id;
+    request.resolvedAt = new Date();
 
-    if (decision === "approved") {
-      const newPassword = randomPassword(12);
-      request.generatedPassword = newPassword;
-      request.organizer.password = newPassword;
+    let generatedPassword = null;
+    if (action === "approve") {
+      generatedPassword = randomPassword(12);
+      request.status = "approved";
+      request.generatedPassword = generatedPassword;
+      request.organizer.password = generatedPassword;
       await request.organizer.save();
+    } else {
+      request.status = "rejected";
     }
 
     await request.save();
 
+    const refreshed = await PasswordResetRequest.findById(request._id)
+      .populate("organizer", "organizerName email")
+      .populate("resolvedBy", "email");
+
     return res.json({
-      message: `Password reset request ${decision}`,
-      request,
-      credentials: decision === "approved" ? { email: request.organizer.email, password: request.generatedPassword } : null,
+      message: `Request ${action}d`,
+      request: refreshed,
+      generatedPassword,
     });
   })
 );

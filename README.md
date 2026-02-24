@@ -27,24 +27,8 @@ This repository contains a full-stack MERN implementation with basic UI and full
 - Organizer dashboard, event lifecycle management (draft/publish/ongoing/completed/closed), analytics, participant list, filtering, CSV export.
 - Organizer profile with Discord webhook support.
 - Admin organizer management (create, disable/archive, permanent delete).
+- Admin dashboard and password-reset-requests navigation page (Part-1 mode keeps this page read-only).
 - Deployment-ready environment structure and docs.
-
-### Advanced (Part 2)
-
-Implemented advanced workflows include:
-
-- Tier A:
-  - Hackathon team registration (team create/join, invite codes, completion flow).
-  - Merchandise payment approval workflow (pending/approved/rejected with ticket generation on approval).
-  - QR attendance scanning workflow with duplicate blocking and audit logs.
-- Tier B:
-  - Real-time event discussion forum (messages, organizer moderation, reactions).
-  - Organizer password reset request and admin approval/rejection workflow.
-  - Team chat (real-time messaging with typing indicators and presence events).
-- Tier C:
-  - Add-to-calendar integration (`.ics`, Google Calendar link, Outlook link, batch export).
-  - Anonymous feedback (rating + comment, organizer analytics/filter/export).
-  - Bot protection (CAPTCHA, failed-attempt tracking, IP block, admin security logs).
 
 ## Local Setup
 

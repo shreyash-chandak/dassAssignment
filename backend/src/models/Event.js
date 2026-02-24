@@ -51,13 +51,6 @@ const eventSchema = new mongoose.Schema(
     formLocked: { type: Boolean, default: false },
     merchandiseItems: [merchandiseItemSchema],
     purchaseLimitPerParticipant: { type: Number, min: 1, default: 1 },
-    paymentApprovalRequired: { type: Boolean, default: false },
-
-    teamConfig: {
-      enabled: { type: Boolean, default: false },
-      maxMembers: { type: Number, min: 1, default: 1 },
-      inviteMode: { type: String, enum: ["code", "link"], default: "code" },
-    },
 
     archived: { type: Boolean, default: false },
   },

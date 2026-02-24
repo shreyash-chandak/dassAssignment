@@ -5,13 +5,12 @@ const registrationSchema = new mongoose.Schema(
     event: { type: mongoose.Schema.Types.ObjectId, ref: "Event", required: true },
     participant: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     organizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    team: { type: mongoose.Schema.Types.ObjectId, ref: "Team", default: null },
     teamName: { type: String, trim: true },
 
     eventType: { type: String, enum: ["normal", "merchandise"], required: true },
     status: {
       type: String,
-      enum: ["registered", "pending_approval", "approved", "rejected", "cancelled", "completed"],
+      enum: ["registered", "rejected", "cancelled", "completed"],
       default: "registered",
     },
     ticketId: { type: String, unique: true, sparse: true },
@@ -33,12 +32,24 @@ const registrationSchema = new mongoose.Schema(
       enum: ["na", "pending", "approved", "rejected"],
       default: "na",
     },
-    paymentProofUrl: { type: String },
+    paymentProofUrl: { type: String, trim: true },
+    paymentReviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    paymentReviewedAt: { type: Date },
+    paymentReviewComment: { type: String, trim: true },
 
     attendance: {
       scannedAt: { type: Date },
       scannedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       manualOverride: { type: Boolean, default: false },
+      logs: [
+        {
+          action: { type: String, trim: true },
+          source: { type: String, trim: true },
+          note: { type: String, trim: true },
+          by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+          at: { type: Date, default: Date.now },
+        },
+      ],
     },
   },
   { timestamps: true }
